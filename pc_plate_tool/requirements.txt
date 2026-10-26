@@ -1,0 +1,16 @@
+# 车牌识别上位机依赖（venv 以 --system-site-packages 创建，复用系统内已有的 torch/cv2/PIL）
+# 补装缺失项：
+#   python -m pip install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com scipy psutil thop
+torch>=1.7
+torchvision
+numpy
+opencv-python
+Pillow
+PyYAML
+scipy
+psutil
+thop
+pandas
+matplotlib
+seaborn
+pyserial>=3.5

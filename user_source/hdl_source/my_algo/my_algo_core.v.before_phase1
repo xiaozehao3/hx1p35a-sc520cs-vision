@@ -1,0 +1,128 @@
+//===========================================================================
+//  my_algo_core.v  ——  灰度变换 / 自适应阈值二值化 / 彩色直通
+//  ---------------------------------------------------------------------
+//  本模块处理每拍 4 个 RGB888 像素，共 96 bit：
+//    I_tdata[95:72] = 像素0   [71:48] = 像素1
+//    I_tdata[47:24] = 像素2   [23:0]  = 像素3
+//
+//  模式 I_mode：
+//    0 = Sobel 边缘检测（由 isp_top 中的 edge_detect_96 完成，本模块作灰度备用）
+//    1 = 灰度变换
+//    2 = 自适应阈值二值化
+//    3 = 彩色直通（调试/观察原始画面）
+//
+//  本模块保持与原厂视频例程一致的一拍流水延迟，不反压视频流。
+//===========================================================================
+module my_algo_core #(
+    parameter IMG_WIDTH  = 1280,
+    parameter IMG_HEIGHT = 720
+)(
+    input               I_clk,
+    input               I_rst_n,
+    input               I_tlast,
+    input               I_tuser,
+    input      [95:0]   I_tdata,
+    input               I_tvalid,
+    input               I_tready,
+    output reg          O_tlast,
+    output reg          O_tuser,
+    output reg [95:0]   O_tdata,
+    output reg          O_tvalid,
+    output              O_tready,
+
+    input      [1:0]    I_mode,
+    input      [7:0]    I_th_offset,
+    output reg [7:0]    O_luma_avg
+);
+
+    assign O_tready = I_tready;
+
+    //---------------- 1. 取 4 个像素 ----------------
+    wire [23:0] pix0 = I_tdata[95:72];
+    wire [23:0] pix1 = I_tdata[71:48];
+    wire [23:0] pix2 = I_tdata[47:24];
+    wire [23:0] pix3 = I_tdata[23:0];
+
+    //---------------- 2. RGB 转灰度 ----------------
+    // BT.601 定点近似：Y = (77*R + 150*G + 29*B) / 256
+    function [7:0] luma8;
+        input [23:0] p;
+        reg [17:0] s;
+        begin
+            s = p[23:16] * 16'd77 + p[15:8] * 16'd150 + p[7:0] * 16'd29;
+            luma8 = s[15:8];
+        end
+    endfunction
+
+    wire [7:0] g0 = luma8(pix0);
+    wire [7:0] g1 = luma8(pix1);
+    wire [7:0] g2 = luma8(pix2);
+    wire [7:0] g3 = luma8(pix3);
+
+    //---------------- 3. 亮度滑动平均：二值化阈值来源 ----------------
+    wire [9:0] beat_sum = {2'b00, g0} + {2'b00, g1}
+                        + {2'b00, g2} + {2'b00, g3};
+    wire [7:0] beat_avg = beat_sum[9:2];
+
+    reg  [7:0] luma_avg;
+    wire [7:0] luma_diff = (beat_avg > luma_avg) ? (beat_avg - luma_avg)
+                                                 : (luma_avg - beat_avg);
+    wire [7:0] luma_step = (luma_diff >> 3) == 8'd0 ? 8'd1 : (luma_diff >> 3);
+    wire [7:0] luma_next = (beat_avg > luma_avg) ? (luma_avg + luma_step)
+                                                 : (luma_avg - luma_step);
+
+    //---------------- 4. 当前阈值，I_th_offset 预留给后续调参 ----------------
+    wire [8:0] th_sum = {1'b0, luma_avg} + {1'b0, I_th_offset};
+    wire [7:0] th_cur = (th_sum > 9'd255) ? 8'd255 : th_sum[7:0];
+
+    //---------------- 5. 三种输出像素 ----------------
+    function [23:0] proc_pix;
+        input [23:0] p;
+        input [7:0]  g;
+        input [7:0]  th;
+        input [1:0]  md;
+        reg          foreground;
+        begin
+            foreground = (g >= th);
+            case (md)
+                // 模式 0 的正式输出由并行 Sobel 模块给出；这里保留灰度备用值。
+                2'd0: proc_pix = {g, g, g};
+                // 灰度变换
+                2'd1: proc_pix = {g, g, g};
+                // 自适应阈值二值化：亮于阈值为白，否则为黑
+                2'd2: proc_pix = foreground ? 24'hFFFFFF : 24'h000000;
+                // 彩色直通，便于先检查摄像头和 HDMI 链路
+                default: proc_pix = p;
+            endcase
+        end
+    endfunction
+
+    wire [23:0] q0 = proc_pix(pix0, g0, th_cur, I_mode);
+    wire [23:0] q1 = proc_pix(pix1, g1, th_cur, I_mode);
+    wire [23:0] q2 = proc_pix(pix2, g2, th_cur, I_mode);
+    wire [23:0] q3 = proc_pix(pix3, g3, th_cur, I_mode);
+
+    //---------------- 6. 输出寄存（与参考例程同样的一拍延迟） ----------------
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_tlast    <= 1'b0;
+            O_tuser    <= 1'b0;
+            O_tdata    <= 96'd0;
+            O_tvalid   <= 1'b0;
+            luma_avg   <= 8'd96;
+            O_luma_avg <= 8'd96;
+        end else begin
+            O_tlast  <= I_tlast;
+            O_tuser  <= I_tuser;
+            O_tvalid <= I_tvalid;
+            if (I_tvalid) begin
+                luma_avg   <= luma_next;
+                O_luma_avg <= luma_avg;
+                O_tdata    <= {q0, q1, q2, q3};
+            end else begin
+                O_tdata    <= 96'd0;
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,1469 @@
+// Lightweight UI overlay placed after the existing project OSD.
+// The original example logo and project brand remain in my_osd.v.
+module vision_ui_osd #(
+    parameter integer IMG_WIDTH  = 1280,
+    parameter integer IMG_HEIGHT = 720
+)(
+    input  wire        I_clk,
+    input  wire        I_rst_n,
+    input  wire        I_tlast,
+    input  wire        I_tuser,
+    input  wire [95:0] I_tdata,
+    input  wire        I_tvalid,
+    input  wire        I_tready,
+    output reg         O_tlast,
+    output reg         O_tuser,
+    output reg  [95:0] O_tdata,
+    output reg         O_tvalid,
+    output wire        O_tready,
+    input  wire [1:0]  I_mode,
+    input  wire [3:0]  I_page,
+    input  wire [3:0]  I_menu_index,
+    input  wire        I_in_menu,
+    input  wire [7:0]  I_fps,
+    input  wire [31:0] I_capture_frame,
+    input  wire [31:0] I_display_frame,
+    input  wire [7:0]  I_latency_frame,
+    input  wire [3:0]  I_switch,
+    input  wire        I_osd_en,
+    input  wire        I_plate_valid,
+    input  wire [10:0] I_plate_x_min,
+    input  wire [10:0] I_plate_x_max,
+    input  wire [10:0] I_plate_y_min,
+    input  wire [10:0] I_plate_y_max,
+    input  wire [7:0]  I_plate_code0,
+    input  wire [7:0]  I_plate_code1,
+    input  wire [7:0]  I_plate_code2,
+    input  wire [7:0]  I_plate_code3,
+    input  wire [7:0]  I_plate_code4,
+    input  wire [7:0]  I_plate_code5,
+    input  wire        I_track_valid,
+    input  wire [10:0] I_track_x_min,
+    input  wire [10:0] I_track_x_max,
+    input  wire [10:0] I_track_y_min,
+    input  wire [10:0] I_track_y_max,
+    input  wire        I_motion_active
+);
+
+    localparam [10:0] PANEL_X = 11'd880;
+    localparam [10:0] PANEL_Y = 11'd0;
+    localparam [10:0] PANEL_W = 11'd400;
+    localparam [10:0] PANEL_H = 11'd352;
+    localparam [10:0] TEXT_X  = 11'd896;
+    localparam [23:0] PANEL_BG = 24'h071322;
+    localparam [23:0] TEXT_COLOR = 24'hF4F7FF;
+    localparam [23:0] SELECT_COLOR = 24'hFFE24A;
+    localparam [23:0] BORDER_COLOR = 24'h2C80B9;
+
+    // Full-screen main menu.  The layout follows the reference board UI:
+    // title strip, then two rows of four selectable icon cards.  All shapes
+    // are generated from comparisons so the menu does not need a bitmap RAM.
+    localparam [10:0] MENU_GRID_X = 11'd84;
+    localparam [10:0] MENU_GRID_Y = 11'd170;
+    localparam [10:0] MENU_TILE_W = 11'd260;
+    localparam [10:0] MENU_TILE_H = 11'd222;
+    localparam [10:0] MENU_GAP_X  = 11'd24;
+    localparam [10:0] MENU_GAP_Y  = 11'd26;
+    localparam [10:0] MENU_TITLE_X = 11'd260;
+    localparam [10:0] MENU_TITLE_Y = 11'd32;
+    localparam [10:0] MENU_SUB_X = 11'd264;
+    localparam [10:0] MENU_SUB_Y = 11'd78;
+    localparam [23:0] MENU_BG = 24'h7894E6;
+    localparam [23:0] MENU_HEADER_BG = 24'hEAF2FF;
+    localparam [23:0] MENU_TILE_BG = 24'hF6F8FF;
+    localparam [23:0] MENU_LABEL_BG = 24'hB9D7FA;
+    localparam [23:0] MENU_LABEL_SEL = 24'h218CEB;
+    localparam [23:0] MENU_SELECT_BORDER = 24'hFFE24A;
+    localparam [23:0] MENU_DARK = 24'h1C3968;
+    localparam [23:0] MENU_SUB_COLOR = 24'h5474A7;
+
+    function [10:0] menu_slot_x;
+        input [3:0] item;
+        begin
+            case (item[1:0])
+                2'd0: menu_slot_x = MENU_GRID_X;
+                2'd1: menu_slot_x = MENU_GRID_X + MENU_TILE_W + MENU_GAP_X;
+                2'd2: menu_slot_x = MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) << 1);
+                default: menu_slot_x = MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) * 3);
+            endcase
+        end
+    endfunction
+
+    function [10:0] menu_slot_y;
+        input [3:0] item;
+        begin
+            menu_slot_y = (item >= 4'd4) ?
+                          (MENU_GRID_Y + MENU_TILE_H + MENU_GAP_Y) : MENU_GRID_Y;
+        end
+    endfunction
+
+    function [3:0] menu_item_at;
+        input [10:0] x;
+        input [10:0] y;
+        begin
+            menu_item_at = 4'hF;
+            if ((y >= MENU_GRID_Y) &&
+                (y < (MENU_GRID_Y + MENU_TILE_H + MENU_GAP_Y + MENU_TILE_H))) begin
+                if ((x >= MENU_GRID_X) &&
+                    (x < (MENU_GRID_X + MENU_TILE_W))) begin
+                    menu_item_at = (y < (MENU_GRID_Y + MENU_TILE_H)) ? 4'd0 : 4'd4;
+                end else if ((x >= (MENU_GRID_X + MENU_TILE_W + MENU_GAP_X)) &&
+                             (x < (MENU_GRID_X + (MENU_TILE_W + MENU_GAP_X) + MENU_TILE_W))) begin
+                    menu_item_at = (y < (MENU_GRID_Y + MENU_TILE_H)) ? 4'd1 : 4'd5;
+                end else if ((x >= (MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) << 1))) &&
+                             (x < (MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) << 1) + MENU_TILE_W))) begin
+                    menu_item_at = (y < (MENU_GRID_Y + MENU_TILE_H)) ? 4'd2 : 4'd6;
+                end else if ((x >= (MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) * 3))) &&
+                             (x < (MENU_GRID_X + ((MENU_TILE_W + MENU_GAP_X) * 3) + MENU_TILE_W))) begin
+                    menu_item_at = (y < (MENU_GRID_Y + MENU_TILE_H)) ? 4'd3 : 4'd7;
+                end
+            end
+        end
+    endfunction
+
+    function [7:0] menu_item_char;
+        input [3:0] item;
+        input [4:0] position;
+        begin
+            menu_item_char = 8'h00;
+            case (item)
+                4'd0: case (position)
+                    5'd0:menu_item_char=8'h53; 5'd1:menu_item_char=8'h54;
+                    5'd2:menu_item_char=8'h59; 5'd3:menu_item_char=8'h4C;
+                    5'd4:menu_item_char=8'h45; 5'd5:menu_item_char=8'h20;
+                    5'd6:menu_item_char=8'h2B; 5'd7:menu_item_char=8'h20;
+                    5'd8:menu_item_char=8'h46; 5'd9:menu_item_char=8'h49;
+                    5'd10:menu_item_char=8'h4C; 5'd11:menu_item_char=8'h4C;
+                    default:menu_item_char=8'h00;
+                endcase
+                4'd1: case (position)
+                    5'd0:menu_item_char=8'h50; 5'd1:menu_item_char=8'h4C;
+                    5'd2:menu_item_char=8'h41; 5'd3:menu_item_char=8'h54;
+                    5'd4:menu_item_char=8'h45; 5'd5:menu_item_char=8'h20;
+                    5'd6:menu_item_char=8'h44; 5'd7:menu_item_char=8'h45;
+                    5'd8:menu_item_char=8'h54; 5'd9:menu_item_char=8'h45;
+                    5'd10:menu_item_char=8'h43; 5'd11:menu_item_char=8'h54;
+                    default:menu_item_char=8'h00;
+                endcase
+                4'd2: case (position)
+                    5'd0:menu_item_char=8'h54; 5'd1:menu_item_char=8'h41;
+                    5'd2:menu_item_char=8'h52; 5'd3:menu_item_char=8'h47;
+                    5'd4:menu_item_char=8'h45; 5'd5:menu_item_char=8'h54;
+                    5'd6:menu_item_char=8'h20; 5'd7:menu_item_char=8'h54;
+                    5'd8:menu_item_char=8'h52; 5'd9:menu_item_char=8'h41;
+                    5'd10:menu_item_char=8'h43; 5'd11:menu_item_char=8'h4B;
+                    default:menu_item_char=8'h00;
+                endcase
+                4'd3: case (position)
+                    5'd0:menu_item_char=8'h4D; 5'd1:menu_item_char=8'h4F;
+                    5'd2:menu_item_char=8'h54; 5'd3:menu_item_char=8'h49;
+                    5'd4:menu_item_char=8'h4F; 5'd5:menu_item_char=8'h4E;
+                    5'd6:menu_item_char=8'h20; 5'd7:menu_item_char=8'h44;
+                    5'd8:menu_item_char=8'h45; 5'd9:menu_item_char=8'h54;
+                    5'd10:menu_item_char=8'h45; 5'd11:menu_item_char=8'h43;
+                    5'd12:menu_item_char=8'h54; default:menu_item_char=8'h00;
+                endcase
+                4'd4: case (position)
+                    5'd0:menu_item_char=8'h41; 5'd1:menu_item_char=8'h55;
+                    5'd2:menu_item_char=8'h54; 5'd3:menu_item_char=8'h4F;
+                    5'd4:menu_item_char=8'h20; 5'd5:menu_item_char=8'h51;
+                    5'd6:menu_item_char=8'h55; 5'd7:menu_item_char=8'h41;
+                    5'd8:menu_item_char=8'h4C; 5'd9:menu_item_char=8'h49;
+                    5'd10:menu_item_char=8'h54; 5'd11:menu_item_char=8'h59;
+                    default:menu_item_char=8'h00;
+                endcase
+                4'd5: case (position)
+                    5'd0:menu_item_char=8'h45; 5'd1:menu_item_char=8'h58;
+                    5'd2:menu_item_char=8'h54; 5'd3:menu_item_char=8'h45;
+                    5'd4:menu_item_char=8'h52; 5'd5:menu_item_char=8'h4E;
+                    5'd6:menu_item_char=8'h41; 5'd7:menu_item_char=8'h4C;
+                    5'd8:menu_item_char=8'h20; 5'd9:menu_item_char=8'h43;
+                    5'd10:menu_item_char=8'h54; 5'd11:menu_item_char=8'h52;
+                    5'd12:menu_item_char=8'h4C; default:menu_item_char=8'h00;
+                endcase
+                4'd6: case (position)
+                    5'd0:menu_item_char=8'h54; 5'd1:menu_item_char=8'h49;
+                    5'd2:menu_item_char=8'h4D; 5'd3:menu_item_char=8'h49;
+                    5'd4:menu_item_char=8'h4E; 5'd5:menu_item_char=8'h47;
+                    5'd6:menu_item_char=8'h20; 5'd7:menu_item_char=8'h4F;
+                    5'd8:menu_item_char=8'h50; 5'd9:menu_item_char=8'h54;
+                    default:menu_item_char=8'h00;
+                endcase
+                default: case (position)
+                    5'd0:menu_item_char=8'h43; 5'd1:menu_item_char=8'h52;
+                    5'd2:menu_item_char=8'h45; 5'd3:menu_item_char=8'h41;
+                    5'd4:menu_item_char=8'h54; 5'd5:menu_item_char=8'h49;
+                    5'd6:menu_item_char=8'h56; 5'd7:menu_item_char=8'h45;
+                    5'd8:menu_item_char=8'h20; 5'd9:menu_item_char=8'h41;
+                    5'd10:menu_item_char=8'h4C; 5'd11:menu_item_char=8'h47;
+                    5'd12:menu_item_char=8'h4F; default:menu_item_char=8'h00;
+                endcase
+            endcase
+            if (position < 5'd15)
+                menu_item_char = project_title_char(item, position);
+        end
+    endfunction
+
+    function [7:0] menu_header_char;
+        input [5:0] position;
+        input       subtitle;
+        begin
+            menu_header_char = 8'h00;
+            if (!subtitle) begin
+                case (position)
+                    6'd0:menu_header_char=8'h41; 6'd1:menu_header_char=8'h4E;
+                    6'd2:menu_header_char=8'h4C; 6'd3:menu_header_char=8'h4F;
+                    6'd4:menu_header_char=8'h47; 6'd5:menu_header_char=8'h49;
+                    6'd6:menu_header_char=8'h43; 6'd7:menu_header_char=8'h20;
+                    6'd8:menu_header_char=8'h46; 6'd9:menu_header_char=8'h50;
+                    6'd10:menu_header_char=8'h47; 6'd11:menu_header_char=8'h41;
+                    6'd12:menu_header_char=8'h20; 6'd13:menu_header_char=8'h56;
+                    6'd14:menu_header_char=8'h49; 6'd15:menu_header_char=8'h53;
+                    6'd16:menu_header_char=8'h49; 6'd17:menu_header_char=8'h4F;
+                    6'd18:menu_header_char=8'h4E; default:menu_header_char=8'h00;
+                endcase
+            end else begin
+                case (position)
+                    6'd0:menu_header_char=8'h32; 6'd1:menu_header_char=8'h30;
+                    6'd2:menu_header_char=8'h32; 6'd3:menu_header_char=8'h36;
+                    6'd4:menu_header_char=8'h20; 6'd5:menu_header_char=8'h43;
+                    6'd6:menu_header_char=8'h4F; 6'd7:menu_header_char=8'h4E;
+                    6'd8:menu_header_char=8'h54; 6'd9:menu_header_char=8'h45;
+                    6'd10:menu_header_char=8'h53; 6'd11:menu_header_char=8'h54;
+                    6'd12:menu_header_char=8'h20; 6'd13:menu_header_char=8'h45;
+                    6'd14:menu_header_char=8'h58; 6'd15:menu_header_char=8'h54;
+                    6'd16:menu_header_char=8'h45; 6'd17:menu_header_char=8'h4E;
+                    6'd18:menu_header_char=8'h53; 6'd19:menu_header_char=8'h49;
+                    6'd20:menu_header_char=8'h4F; 6'd21:menu_header_char=8'h4E;
+                    default:menu_header_char=8'h00;
+                endcase
+            end
+        end
+    endfunction
+
+    function [7:0] menu_char_at;
+        input [10:0] x;
+        input [10:0] y;
+        reg [3:0] item;
+        reg [5:0] char_index;
+        begin
+            menu_char_at = 8'h00;
+            item = menu_item_at(x, y);
+            char_index = 6'd0;
+            if ((x >= MENU_TITLE_X) && (x < (MENU_TITLE_X + 11'd608)) &&
+                (y >= MENU_TITLE_Y) && (y < (MENU_TITLE_Y + 11'd32))) begin
+                char_index = (x - MENU_TITLE_X) >> 5;
+                menu_char_at = menu_header_char(char_index, 1'b0);
+            end else if ((x >= MENU_SUB_X) && (x < (MENU_SUB_X + 11'd352)) &&
+                         (y >= MENU_SUB_Y) && (y < (MENU_SUB_Y + 11'd16))) begin
+                char_index = (x - MENU_SUB_X) >> 4;
+                menu_char_at = menu_header_char(char_index, 1'b1);
+            end else if (item != 4'hF &&
+                         (y >= (menu_slot_y(item) + 11'd176)) &&
+                         (y < (menu_slot_y(item) + 11'd192))) begin
+                char_index = (x - menu_slot_x(item) - 11'd12) >> 4;
+                menu_char_at = menu_item_char(item, char_index[4:0]);
+            end
+        end
+    endfunction
+
+    function [3:0] menu_text_row;
+        input [10:0] y;
+        reg [3:0] item;
+        begin
+            menu_text_row = 4'd0;
+            item = menu_item_at(MENU_GRID_X, y);
+            if ((y >= MENU_TITLE_Y) && (y < (MENU_TITLE_Y + 11'd32)))
+                menu_text_row = (y - MENU_TITLE_Y) >> 1;
+            else if ((y >= MENU_SUB_Y) && (y < (MENU_SUB_Y + 11'd16)))
+                menu_text_row = y - MENU_SUB_Y;
+            else if (item != 4'hF &&
+                     (y >= (menu_slot_y(item) + 11'd176)) &&
+                     (y < (menu_slot_y(item) + 11'd192)))
+                menu_text_row = y - menu_slot_y(item) - 11'd176;
+        end
+    endfunction
+
+    function [3:0] menu_text_col;
+        input [10:0] x;
+        input [10:0] y;
+        reg [3:0] item;
+        begin
+            menu_text_col = 4'd0;
+            item = menu_item_at(x, y);
+            if ((x >= MENU_TITLE_X) && (x < (MENU_TITLE_X + 11'd608)) &&
+                (y >= MENU_TITLE_Y) && (y < (MENU_TITLE_Y + 11'd32)))
+                menu_text_col = ((x - MENU_TITLE_X) >> 1) & 4'hF;
+            else if ((x >= MENU_SUB_X) && (x < (MENU_SUB_X + 11'd352)) &&
+                     (y >= MENU_SUB_Y) && (y < (MENU_SUB_Y + 11'd16)))
+                menu_text_col = (x - MENU_SUB_X) & 4'hF;
+            else if (item != 4'hF)
+                menu_text_col = (x - menu_slot_x(item) - 11'd12) & 4'hF;
+        end
+    endfunction
+
+    function menu_icon_on;
+        input [10:0] x;
+        input [10:0] y;
+        input [3:0] item;
+        reg [10:0] lx;
+        reg [10:0] ly;
+        begin
+            menu_icon_on = 1'b0;
+            lx = 11'd0;
+            ly = 11'd0;
+            if (item != 4'hF) begin
+                lx = x - menu_slot_x(item);
+                ly = y - menu_slot_y(item);
+                case (item)
+                    4'd0: begin // style and fill: palette plus brush
+                        if (((lx >= 11'd70) && (lx < 11'd190) &&
+                             (ly >= 11'd38) && (ly < 11'd118)) ||
+                            ((lx >= 11'd104) && (lx < 11'd188) &&
+                             (ly >= 11'd98) && (ly < 11'd126)))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd1: begin // plate: framed rectangle and characters
+                        if (((lx >= 11'd62) && (lx < 11'd198) &&
+                             ((ly >= 11'd48) && (ly < 11'd56) ||
+                              (ly >= 11'd104) && (ly < 11'd112))) ||
+                            ((ly >= 11'd56) && (ly < 11'd104) &&
+                             ((lx >= 11'd62) && (lx < 11'd70) ||
+                              (lx >= 11'd190) && (lx < 11'd198))) ||
+                            ((ly >= 11'd68) && (ly < 11'd76) &&
+                             (lx >= 11'd82) && (lx < 11'd178)) ||
+                            ((lx >= 11'd88) && (lx < 11'd96) &&
+                             (ly >= 11'd78) && (ly < 11'd98)) ||
+                            ((lx >= 11'd112) && (lx < 11'd120) &&
+                             (ly >= 11'd78) && (ly < 11'd98)) ||
+                            ((lx >= 11'd136) && (lx < 11'd144) &&
+                             (ly >= 11'd78) && (ly < 11'd98)) ||
+                            ((lx >= 11'd160) && (lx < 11'd168) &&
+                             (ly >= 11'd78) && (ly < 11'd98)))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd2: begin // tracking: target ring, cross and center
+                        if ((lx >= 11'd76) && (lx < 11'd84) &&
+                            (ly >= 11'd56) && (ly < 11'd124))
+                            menu_icon_on = 1'b1;
+                        if ((lx >= 11'd176) && (lx < 11'd184) &&
+                            (ly >= 11'd56) && (ly < 11'd124))
+                            menu_icon_on = 1'b1;
+                        if ((ly >= 11'd48) && (ly < 11'd56) &&
+                            (lx >= 11'd84) && (lx < 11'd176))
+                            menu_icon_on = 1'b1;
+                        if ((ly >= 11'd124) && (ly < 11'd132) &&
+                            (lx >= 11'd84) && (lx < 11'd176))
+                            menu_icon_on = 1'b1;
+                        if ((lx >= 11'd124) && (lx < 11'd136) &&
+                            (ly >= 11'd38) && (ly < 11'd142))
+                            menu_icon_on = 1'b1;
+                        if ((ly >= 11'd84) && (ly < 11'd96) &&
+                            (lx >= 11'd66) && (lx < 11'd194))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd3: begin // motion: speed lines and arrow
+                        if (((ly >= 11'd54) && (ly < 11'd64) &&
+                             (lx >= 11'd58) && (lx < 11'd150)) ||
+                            ((ly >= 11'd78) && (ly < 11'd88) &&
+                             (lx >= 11'd74) && (lx < 11'd166)) ||
+                            ((ly >= 11'd102) && (ly < 11'd112) &&
+                             (lx >= 11'd90) && (lx < 11'd182)) ||
+                            ((lx >= 11'd172) && (lx < 11'd194) &&
+                             (ly >= 11'd66) && (ly < 11'd102)) ||
+                            ((lx >= 11'd186) && (lx < 11'd210) &&
+                             (ly >= 11'd76) && (ly < 11'd92)))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd4: begin // automatic quality: sun and camera frame
+                        if (((lx >= 11'd92) && (lx < 11'd168) &&
+                             (ly >= 11'd58) && (ly < 11'd114)) ||
+                            (((lx >= 11'd72) && (lx < 11'd188)) &&
+                             ((ly >= 11'd42) && (ly < 11'd50) ||
+                              (ly >= 11'd122) && (ly < 11'd130))) ||
+                            (((ly >= 11'd50) && (ly < 11'd122)) &&
+                             ((lx >= 11'd76) && (lx < 11'd84) ||
+                              (lx >= 11'd176) && (lx < 11'd184))))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd5: begin // external control: four-way arrows
+                        if (((lx >= 11'd122) && (lx < 11'd138) &&
+                             (ly >= 11'd38) && (ly < 11'd136)) ||
+                            ((ly >= 11'd78) && (ly < 11'd94) &&
+                             (lx >= 11'd72) && (lx < 11'd188)) ||
+                            ((lx >= 11'd106) && (lx < 11'd154) &&
+                             ((ly >= 11'd38) && (ly < 11'd54) ||
+                              (ly >= 11'd120) && (ly < 11'd136))) ||
+                            ((ly >= 11'd62) && (ly < 11'd110) &&
+                             ((lx >= 11'd72) && (lx < 11'd88) ||
+                              (lx >= 11'd172) && (lx < 11'd188))))
+                            menu_icon_on = 1'b1;
+                    end
+                    4'd6: begin // timing/resource optimization: bar chart
+                        if (((lx >= 11'd66) && (lx < 11'd88) &&
+                             (ly >= 11'd98) && (ly < 11'd128)) ||
+                            ((lx >= 11'd98) && (lx < 11'd120) &&
+                             (ly >= 11'd78) && (ly < 11'd128)) ||
+                            ((lx >= 11'd130) && (lx < 11'd152) &&
+                             (ly >= 11'd56) && (ly < 11'd128)) ||
+                            ((lx >= 11'd162) && (lx < 11'd184) &&
+                             (ly >= 11'd38) && (ly < 11'd128)) ||
+                            ((ly >= 11'd128) && (ly < 11'd136) &&
+                             (lx >= 11'd58) && (lx < 11'd194)))
+                            menu_icon_on = 1'b1;
+                    end
+                    default: begin // autonomous creativity: light bulb
+                        if (((lx >= 11'd88) && (lx < 11'd172) &&
+                             (ly >= 11'd42) && (ly < 11'd110)) ||
+                            ((lx >= 11'd104) && (lx < 11'd156) &&
+                             (ly >= 11'd110) && (ly < 11'd132)) ||
+                            ((lx >= 11'd114) && (lx < 11'd146) &&
+                             (ly >= 11'd132) && (ly < 11'd140)))
+                            menu_icon_on = 1'b1;
+                    end
+                endcase
+            end
+        end
+    endfunction
+
+    function [23:0] menu_icon_color;
+        input [3:0] item;
+        input [10:0] x;
+        input [10:0] y;
+        begin
+            case (item)
+                4'd0: menu_icon_color = ((x - menu_slot_x(item)) < 11'd120) ?
+                                        24'hD64B61 : 24'h2E6DB7;
+                4'd1: menu_icon_color = 24'h2F4A70;
+                4'd2: menu_icon_color = 24'h326FC0;
+                4'd3: menu_icon_color = 24'hC45B4E;
+                4'd4: menu_icon_color = 24'hE09A32;
+                4'd5: menu_icon_color = 24'h5D68B8;
+                4'd6: menu_icon_color = 24'h348C72;
+                default: menu_icon_color = 24'hD16D3F;
+            endcase
+        end
+    endfunction
+
+    function menu_logo_on;
+        input [10:0] x;
+        input [10:0] y;
+        reg [10:0] lx;
+        reg [10:0] ly;
+        begin
+            menu_logo_on = 1'b0;
+            lx = x - 11'd48;
+            ly = y - 11'd20;
+            if ((x >= 11'd48) && (x < 11'd208) &&
+                (y >= 11'd20) && (y < 11'd132)) begin
+                if (((lx >= 11'd28) && (lx < 11'd40) &&
+                     (ly >= 11'd24) && (ly < 11'd98)) ||
+                    ((lx >= 11'd88) && (lx < 11'd100) &&
+                     (ly >= 11'd24) && (ly < 11'd98)) ||
+                    ((ly >= 11'd88) && (ly < 11'd100) &&
+                     (lx >= 11'd28) && (lx < 11'd100)) ||
+                    ((lx >= 11'd40) && (lx < 11'd88) &&
+                     (ly >= 11'd52) && (ly < 11'd64)))
+                    menu_logo_on = 1'b1;
+                if ((lx >= 11'd98) && (lx < 11'd140) &&
+                    (ly >= 11'd20) && (ly < 11'd82) &&
+                    ((ly < 11'd30 && lx >= 11'd120) ||
+                     (ly >= 11'd30 && ly < 11'd40 && lx >= 11'd112) ||
+                     (ly >= 11'd40 && ly < 11'd50 && lx >= 11'd104) ||
+                     (ly >= 11'd50 && ly < 11'd60 && lx >= 11'd112) ||
+                     (ly >= 11'd60 && ly < 11'd70 && lx >= 11'd120)))
+                    menu_logo_on = 1'b1;
+            end
+        end
+    endfunction
+
+    function [23:0] menu_logo_color;
+        input [10:0] x;
+        input [10:0] y;
+        begin
+            if ((x >= 11'd146) && (y < 11'd90))
+                menu_logo_color = 24'hD86B72;
+            else
+                menu_logo_color = 24'h1C2E55;
+        end
+    endfunction
+
+    function [23:0] menu_background;
+        input [10:0] x;
+        input [10:0] y;
+        input [3:0] selected;
+        reg [3:0] item;
+        reg [10:0] sx;
+        reg [10:0] sy;
+        begin
+            menu_background = MENU_BG;
+            item = menu_item_at(x, y);
+            if ((y < 11'd146))
+                menu_background = MENU_HEADER_BG;
+            if (item != 4'hF) begin
+                sx = menu_slot_x(item);
+                sy = menu_slot_y(item);
+                if ((item == selected) &&
+                    ((x < (sx + 11'd5)) || (x >= (sx + MENU_TILE_W - 11'd5)) ||
+                     (y < (sy + 11'd5)) || (y >= (sy + MENU_TILE_H - 11'd5))))
+                    menu_background = MENU_SELECT_BORDER;
+                else if (y >= (sy + 11'd168))
+                    menu_background = (item == selected) ? MENU_LABEL_SEL : MENU_LABEL_BG;
+                else
+                    menu_background = MENU_TILE_BG;
+            end
+        end
+    endfunction
+
+    function [23:0] menu_text_color;
+        input [10:0] y;
+        input [3:0] item;
+        input [3:0] selected;
+        begin
+            if ((y >= MENU_TITLE_Y) && (y < (MENU_TITLE_Y + 11'd32)))
+                menu_text_color = MENU_DARK;
+            else if ((y >= MENU_SUB_Y) && (y < (MENU_SUB_Y + 11'd16)))
+                menu_text_color = MENU_SUB_COLOR;
+            else if (item == selected)
+                menu_text_color = 24'hFFFFFF;
+            else
+                menu_text_color = MENU_DARK;
+        end
+    endfunction
+
+    assign O_tready = I_tready;
+
+    wire [23:0] I_pix0 = I_tdata[95:72];
+    wire [23:0] I_pix1 = I_tdata[71:48];
+    wire [23:0] I_pix2 = I_tdata[47:24];
+    wire [23:0] I_pix3 = I_tdata[23:0];
+
+    reg [8:0]  x_grp;
+    reg [10:0] y_pos;
+    wire [10:0] x_base = {x_grp, 2'b00};
+    wire [10:0] x0 = x_base;
+    wire [10:0] x1 = x_base + 11'd1;
+    wire [10:0] x2 = x_base + 11'd2;
+    wire [10:0] x3 = x_base + 11'd3;
+
+    function [7:0] hex_char;
+        input [3:0] value;
+        begin
+            if (value < 4'd10)
+                hex_char = 8'h30 + value;
+            else
+                hex_char = 8'h41 + value - 4'd10;
+        end
+    endfunction
+
+    function [7:0] dec_char;
+        input [7:0] value;
+        input [1:0] position;
+        reg [7:0] tens;
+        reg [7:0] ones;
+        begin
+            tens = value / 8'd10;
+            ones = value % 8'd10;
+            case (position)
+                2'd0: dec_char = (tens == 0) ? 8'h20 : (8'h30 + tens);
+                default: dec_char = 8'h30 + ones;
+            endcase
+        end
+    endfunction
+
+    // The low six hexadecimal digits are stable and avoid a large decimal divider.
+    function [7:0] frame_hex_char;
+        input [31:0] value;
+        input [2:0] position;
+        begin
+            case (position)
+                3'd0: frame_hex_char = hex_char(value[23:20]);
+                3'd1: frame_hex_char = hex_char(value[19:16]);
+                3'd2: frame_hex_char = hex_char(value[15:12]);
+                3'd3: frame_hex_char = hex_char(value[11:8]);
+                3'd4: frame_hex_char = hex_char(value[7:4]);
+                default: frame_hex_char = hex_char(value[3:0]);
+            endcase
+        end
+    endfunction
+
+    function [7:0] coord_hex_char;
+        input [10:0] value;
+        input [1:0] position;
+        begin
+            case (position)
+                2'd0: coord_hex_char = hex_char({1'b0,value[10:8]});
+                2'd1: coord_hex_char = hex_char(value[7:4]);
+                default: coord_hex_char = hex_char(value[3:0]);
+            endcase
+        end
+    endfunction
+
+    function [7:0] plate_code_char;
+        input [2:0] position;
+        input [7:0] code0;
+        input [7:0] code1;
+        input [7:0] code2;
+        input [7:0] code3;
+        input [7:0] code4;
+        input [7:0] code5;
+        begin
+            case (position)
+                3'd0: plate_code_char = code0;
+                3'd1: plate_code_char = code1;
+                3'd2: plate_code_char = code2;
+                3'd3: plate_code_char = code3;
+                3'd4: plate_code_char = code4;
+                default: plate_code_char = code5;
+            endcase
+        end
+    endfunction
+
+    function [7:0] mode_char;
+        input [1:0] mode;
+        input [3:0] position;
+        begin
+            case (position)
+                4'd0: mode_char = 8'h4D;
+                4'd1: mode_char = 8'h6F;
+                4'd2: mode_char = 8'h64;
+                4'd3: mode_char = 8'h65;
+                4'd4: mode_char = 8'h6C;
+                4'd5: mode_char = 8'h31 + mode;
+                4'd6: mode_char = 8'h3A;
+                4'd7: mode_char = (mode == 2'd0) ? 8'h82 :
+                                             (mode == 2'd1) ? 8'h84 :
+                                             (mode == 2'd2) ? 8'h87 : 8'h8B;
+                4'd8: mode_char = (mode == 2'd0) ? 8'h83 :
+                                             (mode == 2'd1) ? 8'h85 :
+                                             (mode == 2'd2) ? 8'h88 : 8'h8C;
+                4'd9: mode_char = (mode == 2'd1) ? 8'h86 :
+                                             (mode == 2'd2) ? 8'h89 : 8'h00;
+                4'd10: mode_char = (mode == 2'd2) ? 8'h8A : 8'h00;
+                default: mode_char = 8'h00;
+            endcase
+        end
+    endfunction
+
+    function [7:0] page_char;
+        input [3:0] page;
+        input [3:0] position;
+        begin
+            case (position)
+                4'd0: page_char = 8'h50;
+                4'd1: page_char = 8'h41;
+                4'd2: page_char = 8'h47;
+                4'd3: page_char = 8'h45;
+                4'd4: page_char = 8'h3A;
+                4'd5: page_char = 8'h30 + page;
+                4'd6: page_char = 8'h20;
+                default: page_char = 8'h00;
+            endcase
+        end
+    endfunction
+
+    // Exact Chinese project titles used by both the main menu and page header.
+    // Codes 0xA2..0xD8 are the 16x16 Chinese glyphs added to my_osd.v.
+    function [7:0] project_title_char;
+        input [3:0] item;
+        input [4:0] position;
+        begin
+            project_title_char = 8'h00;
+            case (item)
+                4'd0: case (position)
+                    5'd0:project_title_char=8'hA2; 5'd1:project_title_char=8'hA3;
+                    5'd2:project_title_char=8'hA4; 5'd3:project_title_char=8'hA5;
+                    5'd4:project_title_char=8'hA6; 5'd5:project_title_char=8'hA7;
+                    5'd6:project_title_char=8'hA8; 5'd7:project_title_char=8'hA9;
+                    5'd8:project_title_char=8'hAA; 5'd9:project_title_char=8'hAB;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd1: case (position)
+                    5'd0:project_title_char=8'hAC; 5'd1:project_title_char=8'hAD;
+                    5'd2:project_title_char=8'hAE; 5'd3:project_title_char=8'hAF;
+                    5'd4:project_title_char=8'hB0; 5'd5:project_title_char=8'hAC;
+                    5'd6:project_title_char=8'hAD; 5'd7:project_title_char=8'hB1;
+                    5'd8:project_title_char=8'hB2; 5'd9:project_title_char=8'hB3;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd2: case (position)
+                    5'd0:project_title_char=8'hB4; 5'd1:project_title_char=8'hB5;
+                    5'd2:project_title_char=8'hB6; 5'd3:project_title_char=8'hB7;
+                    5'd4:project_title_char=8'hA6; 5'd5:project_title_char=8'hB8;
+                    5'd6:project_title_char=8'hB5; 5'd7:project_title_char=8'hB9;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd3: case (position)
+                    5'd0:project_title_char=8'hBA; 5'd1:project_title_char=8'hBB;
+                    5'd2:project_title_char=8'hB4; 5'd3:project_title_char=8'hB5;
+                    5'd4:project_title_char=8'hAE; 5'd5:project_title_char=8'hAF;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd4: case (position)
+                    5'd0:project_title_char=8'hBC; 5'd1:project_title_char=8'hBB;
+                    5'd2:project_title_char=8'hBD; 5'd3:project_title_char=8'hBE;
+                    5'd4:project_title_char=8'hBF; 5'd5:project_title_char=8'h2F;
+                    5'd6:project_title_char=8'hBC; 5'd7:project_title_char=8'hBB;
+                    5'd8:project_title_char=8'hC0; 5'd9:project_title_char=8'hC1;
+                    5'd10:project_title_char=8'hC2; 5'd11:project_title_char=8'hC3;
+                    5'd12:project_title_char=8'hC4; 5'd13:project_title_char=8'hC5;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd5: case (position)
+                    5'd0:project_title_char=8'hC6; 5'd1:project_title_char=8'hC7;
+                    5'd2:project_title_char=8'hC8; 5'd3:project_title_char=8'hC9;
+                    5'd4:project_title_char=8'hCA; 5'd5:project_title_char=8'hCB;
+                    default:project_title_char=8'h00;
+                endcase
+                4'd6: case (position)
+                    5'd0:project_title_char=8'hA7; 5'd1:project_title_char=8'hA8;
+                    5'd2:project_title_char=8'hCC; 5'd3:project_title_char=8'hCD;
+                    5'd4:project_title_char=8'hA6; 5'd5:project_title_char=8'hCE;
+                    5'd6:project_title_char=8'hCF; 5'd7:project_title_char=8'hD0;
+                    5'd8:project_title_char=8'hAB;
+                    default:project_title_char=8'h00;
+                endcase
+                default: case (position)
+                    5'd0:project_title_char=8'hD1; 5'd1:project_title_char=8'hD2;
+                    5'd2:project_title_char=8'hD3; 5'd3:project_title_char=8'hBC;
+                    5'd4:project_title_char=8'hD4; 5'd5:project_title_char=8'hD5;
+                    5'd6:project_title_char=8'hD6; 5'd7:project_title_char=8'hD7;
+                    5'd8:project_title_char=8'hD8;
+                default:project_title_char=8'h00;
+                endcase
+            endcase
+        end
+    endfunction
+
+    // The legacy ASCII list remains as a fallback for unused character cells.
+    function [7:0] menu_char;
+        input [3:0] item;
+        input [4:0] position;
+        begin
+            menu_char = 8'h00;
+            case (item)
+                4'd0: case (position)
+                    5'd0:menu_char=8'h31; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h49;
+                    5'd3:menu_char=8'h4D; 5'd4:menu_char=8'h41; 5'd5:menu_char=8'h47;
+                    5'd6:menu_char=8'h45; 5'd7:menu_char=8'h20; 5'd8:menu_char=8'h4D;
+                    5'd9:menu_char=8'h4F; 5'd10:menu_char=8'h44; 5'd11:menu_char=8'h45;
+                    default:menu_char=8'h00;
+                endcase
+                4'd1: case (position)
+                    5'd0:menu_char=8'h32; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h45;
+                    5'd3:menu_char=8'h4E; 5'd4:menu_char=8'h48; 5'd5:menu_char=8'h41;
+                    5'd6:menu_char=8'h4E; 5'd7:menu_char=8'h43; 5'd8:menu_char=8'h45;
+                    default:menu_char=8'h00;
+                endcase
+                4'd2: case (position)
+                    5'd0:menu_char=8'h33; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h50;
+                    5'd3:menu_char=8'h4C; 5'd4:menu_char=8'h41; 5'd5:menu_char=8'h54;
+                    5'd6:menu_char=8'h45; 5'd7:menu_char=8'h20; 5'd8:menu_char=8'h4F;
+                    5'd9:menu_char=8'h43; 5'd10:menu_char=8'h52; default:menu_char=8'h00;
+                endcase
+                4'd3: case (position)
+                    5'd0:menu_char=8'h34; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h54;
+                    5'd3:menu_char=8'h52; 5'd4:menu_char=8'h41; 5'd5:menu_char=8'h43;
+                    5'd6:menu_char=8'h4B; 5'd7:menu_char=8'h49; 5'd8:menu_char=8'h4E;
+                    5'd9:menu_char=8'h47; default:menu_char=8'h00;
+                endcase
+                4'd4: case (position)
+                    5'd0:menu_char=8'h35; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h50;
+                    5'd3:menu_char=8'h45; 5'd4:menu_char=8'h52; 5'd5:menu_char=8'h46;
+                    5'd6:menu_char=8'h4F; 5'd7:menu_char=8'h52; 5'd8:menu_char=8'h4D;
+                    5'd9:menu_char=8'h41; 5'd10:menu_char=8'h4E; 5'd11:menu_char=8'h43;
+                    5'd12:menu_char=8'h45; default:menu_char=8'h00;
+                endcase
+                4'd5: case (position)
+                    5'd0:menu_char=8'h36; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h4D;
+                    5'd3:menu_char=8'h4F; 5'd4:menu_char=8'h54; 5'd5:menu_char=8'h49;
+                    5'd6:menu_char=8'h4F; 5'd7:menu_char=8'h4E; default:menu_char=8'h00;
+                endcase
+                4'd6: case (position)
+                    5'd0:menu_char=8'h37; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h41;
+                    5'd3:menu_char=8'h55; 5'd4:menu_char=8'h54; 5'd5:menu_char=8'h4F;
+                    5'd6:menu_char=8'h20; 5'd7:menu_char=8'h57; 5'd8:menu_char=8'h42;
+                    default:menu_char=8'h00;
+                endcase
+                4'd7: case (position)
+                    5'd0:menu_char=8'h38; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h4C;
+                    5'd3:menu_char=8'h41; 5'd4:menu_char=8'h53; 5'd5:menu_char=8'h45;
+                    5'd6:menu_char=8'h52; 5'd7:menu_char=8'h20; 5'd8:menu_char=8'h54;
+                    5'd9:menu_char=8'h41; 5'd10:menu_char=8'h52; 5'd11:menu_char=8'h47;
+                    5'd12:menu_char=8'h45; 5'd13:menu_char=8'h54; default:menu_char=8'h00;
+                endcase
+                default: case (position)
+                    5'd0:menu_char=8'h39; 5'd1:menu_char=8'h20; 5'd2:menu_char=8'h53;
+                    5'd3:menu_char=8'h59; 5'd4:menu_char=8'h53; 5'd5:menu_char=8'h54;
+                    5'd6:menu_char=8'h45; 5'd7:menu_char=8'h4D; 5'd8:menu_char=8'h20;
+                    5'd9:menu_char=8'h49; 5'd10:menu_char=8'h4E; 5'd11:menu_char=8'h46;
+                    5'd12:menu_char=8'h4F; 5'd13:menu_char=8'h20; 5'd14:menu_char=8'h00;
+                    default:menu_char=8'h00;
+                endcase
+            endcase
+            if (position < 5'd15)
+                menu_char = project_title_char(item, position);
+        end
+    endfunction
+
+    function [7:0] page_info_char;
+        input [3:0] page;
+        input [4:0] position;
+        begin
+            page_info_char = 8'h00;
+            case (page)
+                4'd0: case(position)
+                    5'd0:page_info_char=8'h4D;5'd1:page_info_char=8'h4F;5'd2:page_info_char=8'h44;
+                    5'd3:page_info_char=8'h45;5'd4:page_info_char=8'h4C;5'd5:page_info_char=8'h31;
+                    5'd6:page_info_char=8'h2D;5'd7:page_info_char=8'h34;default:page_info_char=8'h00;
+                endcase
+                4'd1: case(position)
+                    5'd0:page_info_char=8'h42;5'd1:page_info_char=8'h52;5'd2:page_info_char=8'h49;
+                    5'd3:page_info_char=8'h47;5'd4:page_info_char=8'h48;5'd5:page_info_char=8'h54;
+                    5'd6:page_info_char=8'h4E;5'd7:page_info_char=8'h45;5'd8:page_info_char=8'h53;
+                    5'd9:page_info_char=8'h53;default:page_info_char=8'h00;
+                endcase
+                4'd2: case(position)
+                    5'd0:page_info_char=8'h50;5'd1:page_info_char=8'h4C;5'd2:page_info_char=8'h41;
+                    5'd3:page_info_char=8'h54;5'd4:page_info_char=8'h45;5'd5:page_info_char=8'h20;
+                    5'd6:page_info_char=8'h44;5'd7:page_info_char=8'h45;5'd8:page_info_char=8'h54;
+                    5'd9:page_info_char=8'h45;5'd10:page_info_char=8'h43;5'd11:page_info_char=8'h54;
+                    default:page_info_char=8'h00;
+                endcase
+                4'd3: case(position)
+                    5'd0:page_info_char=8'h54;5'd1:page_info_char=8'h52;5'd2:page_info_char=8'h41;
+                    5'd3:page_info_char=8'h43;5'd4:page_info_char=8'h4B;5'd5:page_info_char=8'h20;
+                    5'd6:page_info_char=8'h52;5'd7:page_info_char=8'h45;5'd8:page_info_char=8'h41;
+                    5'd9:page_info_char=8'h44;5'd10:page_info_char=8'h59;default:page_info_char=8'h00;
+                endcase
+                4'd4: case(position)
+                    5'd0:page_info_char=8'h46;5'd1:page_info_char=8'h50;5'd2:page_info_char=8'h53;
+                    5'd3:page_info_char=8'h20;5'd4:page_info_char=8'h2F;5'd5:page_info_char=8'h20;
+                    5'd6:page_info_char=8'h4C;5'd7:page_info_char=8'h41;5'd8:page_info_char=8'h54;
+                    default:page_info_char=8'h00;
+                endcase
+                4'd5: case(position)
+                    5'd0:page_info_char=8'h46;5'd1:page_info_char=8'h52;5'd2:page_info_char=8'h41;
+                    5'd3:page_info_char=8'h4D;5'd4:page_info_char=8'h45;5'd5:page_info_char=8'h20;
+                    5'd6:page_info_char=8'h44;5'd7:page_info_char=8'h49;5'd8:page_info_char=8'h46;
+                    default:page_info_char=8'h00;
+                endcase
+                4'd6: case(position)
+                    5'd0:page_info_char=8'h41;5'd1:page_info_char=8'h55;5'd2:page_info_char=8'h54;
+                    5'd3:page_info_char=8'h4F;5'd4:page_info_char=8'h20;5'd5:page_info_char=8'h57;
+                    5'd6:page_info_char=8'h42;default:page_info_char=8'h00;
+                endcase
+                4'd7: case(position)
+                    5'd0:page_info_char=8'h4C;5'd1:page_info_char=8'h41;5'd2:page_info_char=8'h53;
+                    5'd3:page_info_char=8'h45;5'd4:page_info_char=8'h52;5'd5:page_info_char=8'h20;
+                    5'd6:page_info_char=8'h54;5'd7:page_info_char=8'h41;5'd8:page_info_char=8'h52;
+                    5'd9:page_info_char=8'h47;5'd10:page_info_char=8'h45;5'd11:page_info_char=8'h54;
+                    default:page_info_char=8'h00;
+                endcase
+                default: case(position)
+                    5'd0:page_info_char=8'h53;5'd1:page_info_char=8'h59;5'd2:page_info_char=8'h53;
+                    5'd3:page_info_char=8'h54;5'd4:page_info_char=8'h45;5'd5:page_info_char=8'h4D;
+                    5'd6:page_info_char=8'h20;5'd7:page_info_char=8'h52;5'd8:page_info_char=8'h45;
+                    5'd9:page_info_char=8'h41;5'd10:page_info_char=8'h44;5'd11:page_info_char=8'h59;
+                    default:page_info_char=8'h00;
+                endcase
+            endcase
+            if (position < 5'd15)
+                page_info_char = project_title_char(page, position);
+        end
+    endfunction
+
+    function [7:0] ui_char_at;
+        input [10:0] x;
+        input [10:0] y;
+        input [1:0]  mode;
+        input [3:0]  page;
+        input [3:0]  menu_index;
+        input        in_menu;
+        input [7:0]  fps;
+        input [31:0] capture_frame;
+        input [31:0] display_frame;
+        input [7:0]  latency_frame;
+        input [3:0]  sw;
+        input        plate_valid;
+        input [10:0] plate_x_min;
+        input [10:0] plate_x_max;
+        input [10:0] plate_y_min;
+        input [10:0] plate_y_max;
+        input [7:0]  plate_code0;
+        input [7:0]  plate_code1;
+        input [7:0]  plate_code2;
+        input [7:0]  plate_code3;
+        input [7:0]  plate_code4;
+        input [7:0]  plate_code5;
+        input        track_valid;
+        input [10:0] track_x_min;
+        input [10:0] track_x_max;
+        input [10:0] track_y_min;
+        input [10:0] track_y_max;
+        input        motion_active;
+        reg [10:0] dx;
+        reg [4:0]  char_cell;
+        reg [4:0]  line;
+        begin
+            ui_char_at = 8'h00;
+            dx = 11'd0;
+            char_cell = 5'd0;
+            line = 5'd0;
+            if ((x >= TEXT_X) && (x < (PANEL_X + PANEL_W)) &&
+                (y >= PANEL_Y) && (y < (PANEL_Y + PANEL_H))) begin
+                dx = x - TEXT_X;
+                char_cell = dx >> 4;
+                line = (y - PANEL_Y) >> 4;
+                case (line)
+                    5'd0: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h46;5'd1:ui_char_at=8'h50;5'd2:ui_char_at=8'h47;
+                            5'd3:ui_char_at=8'h41;5'd4:ui_char_at=8'h20;5'd5:ui_char_at=8'h56;
+                            5'd6:ui_char_at=8'h49;5'd7:ui_char_at=8'h53;5'd8:ui_char_at=8'h49;
+                            5'd9:ui_char_at=8'h4F;5'd10:ui_char_at=8'h4E;5'd11:ui_char_at=8'h20;
+                            5'd12:ui_char_at=8'h55;5'd13:ui_char_at=8'h49;
+                            default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd1: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h46;5'd1:ui_char_at=8'h50;5'd2:ui_char_at=8'h53;
+                            5'd3:ui_char_at=8'h3A;5'd4:ui_char_at=dec_char(fps,2'd0);
+                            5'd5:ui_char_at=dec_char(fps,2'd1);5'd6:ui_char_at=8'h20;
+                            5'd7:ui_char_at=8'h43;5'd8:ui_char_at=8'h41;5'd9:ui_char_at=8'h50;
+                            5'd10:ui_char_at=8'h3A;5'd11:ui_char_at=frame_hex_char(capture_frame,3'd0);
+                            5'd12:ui_char_at=frame_hex_char(capture_frame,3'd1);
+                            5'd13:ui_char_at=frame_hex_char(capture_frame,3'd2);
+                            5'd14:ui_char_at=frame_hex_char(capture_frame,3'd3);
+                            5'd15:ui_char_at=frame_hex_char(capture_frame,3'd4);
+                            5'd16:ui_char_at=frame_hex_char(capture_frame,3'd5);
+                            default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd2: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h44;5'd1:ui_char_at=8'h49;5'd2:ui_char_at=8'h53;
+                            5'd3:ui_char_at=8'h3A;5'd4:ui_char_at=frame_hex_char(display_frame,3'd0);
+                            5'd5:ui_char_at=frame_hex_char(display_frame,3'd1);
+                            5'd6:ui_char_at=frame_hex_char(display_frame,3'd2);
+                            5'd7:ui_char_at=frame_hex_char(display_frame,3'd3);
+                            5'd8:ui_char_at=frame_hex_char(display_frame,3'd4);
+                            5'd9:ui_char_at=frame_hex_char(display_frame,3'd5);
+                            5'd11:ui_char_at=8'h4C;5'd12:ui_char_at=8'h41;5'd13:ui_char_at=8'h54;
+                            5'd14:ui_char_at=8'h3A;5'd15:ui_char_at=hex_char(latency_frame[7:4]);
+                            5'd16:ui_char_at=hex_char(latency_frame[3:0]);5'd17:ui_char_at=8'h46;
+                            default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd3: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h4D;5'd1:ui_char_at=8'h4F;5'd2:ui_char_at=8'h44;
+                            5'd3:ui_char_at=8'h45;5'd4:ui_char_at=8'h3A;5'd5:ui_char_at=mode_char(mode,4'd0);
+                            5'd6:ui_char_at=mode_char(mode,4'd1);5'd7:ui_char_at=mode_char(mode,4'd2);
+                            5'd8:ui_char_at=mode_char(mode,4'd3);5'd9:ui_char_at=mode_char(mode,4'd4);
+                            5'd10:ui_char_at=mode_char(mode,4'd5);5'd11:ui_char_at=mode_char(mode,4'd6);
+                            5'd12:ui_char_at=mode_char(mode,4'd7);5'd13:ui_char_at=mode_char(mode,4'd8);
+                            5'd14:ui_char_at=mode_char(mode,4'd9);5'd15:ui_char_at=mode_char(mode,4'd10);
+                            default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd4: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h4D;5'd1:ui_char_at=8'h45;5'd2:ui_char_at=8'h4E;
+                            5'd3:ui_char_at=8'h55;5'd4:ui_char_at=8'h20;5'd5:ui_char_at=8'h50;
+                            5'd6:ui_char_at=8'h41;5'd7:ui_char_at=8'h47;5'd8:ui_char_at=8'h45;
+                            5'd9:ui_char_at=8'h3A;5'd10:ui_char_at=8'h20;
+                            5'd11:ui_char_at=8'h30 + (in_menu ? menu_index : page);
+                            default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd5,5'd6,5'd7,5'd8,5'd9,5'd10,5'd11,5'd12,5'd13: begin
+                        if (in_menu)
+                            ui_char_at = menu_char(line - 5'd5, char_cell);
+                        else if (line == 5'd5)
+                            ui_char_at = page_info_char(page, char_cell);
+                        else if (line == 5'd6) begin
+                            case (page)
+                                4'd1: begin
+                                    ui_char_at = plate_valid ? 8'h50 : 8'h50;
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h50;5'd1:ui_char_at=8'h4C;
+                                        5'd2:ui_char_at=8'h41;5'd3:ui_char_at=8'h54;
+                                        5'd4:ui_char_at=8'h45;5'd5:ui_char_at=8'h3A;
+                                        5'd6:ui_char_at=plate_valid ? 8'h46 : 8'h53;
+                                        5'd7:ui_char_at=plate_valid ? 8'h4F : 8'h45;
+                                        5'd8:ui_char_at=plate_valid ? 8'h55 : 8'h41;
+                                        5'd9:ui_char_at=plate_valid ? 8'h4E : 8'h52;
+                                        5'd10:ui_char_at=plate_valid ? 8'h44 : 8'h43;
+                                        5'd11:ui_char_at=plate_valid ? 8'h20 : 8'h48;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd2: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h54;5'd1:ui_char_at=8'h52;
+                                        5'd2:ui_char_at=8'h41;5'd3:ui_char_at=8'h43;
+                                        5'd4:ui_char_at=8'h4B;5'd5:ui_char_at=8'h3A;
+                                        5'd6:ui_char_at=track_valid ? 8'h46 : 8'h53;
+                                        5'd7:ui_char_at=track_valid ? 8'h4F : 8'h45;
+                                        5'd8:ui_char_at=track_valid ? 8'h55 : 8'h41;
+                                        5'd9:ui_char_at=track_valid ? 8'h4E : 8'h52;
+                                        5'd10:ui_char_at=track_valid ? 8'h44 : 8'h43;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd3: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h4D;5'd1:ui_char_at=8'h4F;
+                                        5'd2:ui_char_at=8'h54;5'd3:ui_char_at=8'h49;
+                                        5'd4:ui_char_at=8'h4F;5'd5:ui_char_at=8'h4E;
+                                        5'd6:ui_char_at=8'h3A;5'd7:ui_char_at=motion_active ? 8'h4F : 8'h4F;
+                                        5'd8:ui_char_at=motion_active ? 8'h4E : 8'h46;
+                                        5'd9:ui_char_at=motion_active ? 8'h20 : 8'h46;
+                                        5'd10:ui_char_at=motion_active ? 8'h20 : 8'h20;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd4: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h41;5'd1:ui_char_at=8'h55;
+                                        5'd2:ui_char_at=8'h54;5'd3:ui_char_at=8'h4F;
+                                        5'd4:ui_char_at=8'h20;5'd5:ui_char_at=8'h51;
+                                        5'd6:ui_char_at=8'h55;5'd7:ui_char_at=8'h41;
+                                        5'd8:ui_char_at=8'h4C;5'd9:ui_char_at=8'h49;
+                                        5'd10:ui_char_at=8'h54;5'd11:ui_char_at=8'h59;
+                                        5'd12:ui_char_at=8'h20;5'd13:ui_char_at=8'h4F;
+                                        5'd14:ui_char_at=8'h4E;default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd5: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h43;5'd1:ui_char_at=8'h54;
+                                        5'd2:ui_char_at=8'h52;5'd3:ui_char_at=8'h4C;
+                                        5'd4:ui_char_at=8'h3A;5'd5:ui_char_at=8'h55;
+                                        5'd6:ui_char_at=8'h41;5'd7:ui_char_at=8'h52;
+                                        5'd8:ui_char_at=8'h54;5'd9:ui_char_at=8'h31;
+                                        5'd10:ui_char_at=8'h31;5'd11:ui_char_at=8'h35;
+                                        5'd12:ui_char_at=8'h32;5'd13:ui_char_at=8'h30;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd6: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h54;5'd1:ui_char_at=8'h49;
+                                        5'd2:ui_char_at=8'h4D;5'd3:ui_char_at=8'h49;
+                                        5'd4:ui_char_at=8'h4E;5'd5:ui_char_at=8'h47;
+                                        5'd6:ui_char_at=8'h20;5'd7:ui_char_at=8'h4F;
+                                        5'd8:ui_char_at=8'h4B;default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd7: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h43;5'd1:ui_char_at=8'h52;
+                                        5'd2:ui_char_at=8'h45;5'd3:ui_char_at=8'h41;
+                                        5'd4:ui_char_at=8'h54;5'd5:ui_char_at=8'h49;
+                                        5'd6:ui_char_at=8'h56;5'd7:ui_char_at=8'h45;
+                                        5'd8:ui_char_at=8'h3A;5'd9:ui_char_at=8'h54;
+                                        5'd10:ui_char_at=8'h48;5'd11:ui_char_at=8'h45;
+                                        5'd12:ui_char_at=8'h52;5'd13:ui_char_at=8'h4D;
+                                        5'd14:ui_char_at=8'h41;default:ui_char_at=8'h4C;
+                                    endcase
+                                end
+                                default: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h53;5'd1:ui_char_at=8'h54;
+                                        5'd2:ui_char_at=8'h41;5'd3:ui_char_at=8'h54;
+                                        5'd4:ui_char_at=8'h55;5'd5:ui_char_at=8'h53;
+                                        5'd6:ui_char_at=8'h3A;5'd7:ui_char_at=8'h20;
+                                        5'd8:ui_char_at=8'h57;5'd9:ui_char_at=8'h41;
+                                        5'd10:ui_char_at=8'h49;5'd11:ui_char_at=8'h54;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                            endcase
+                        end else if (line == 5'd7) begin
+                            case(char_cell)
+                                5'd0:ui_char_at=8'h53;5'd1:ui_char_at=8'h57;
+                                5'd2:ui_char_at=8'h31;5'd3:ui_char_at=8'h3D;
+                                5'd4:ui_char_at=sw[0] ? 8'h31 : 8'h30;
+                                5'd5:ui_char_at=8'h20;5'd6:ui_char_at=8'h53;
+                                5'd7:ui_char_at=8'h57;5'd8:ui_char_at=8'h32;
+                                5'd9:ui_char_at=8'h3D;
+                                5'd10:ui_char_at=sw[1] ? 8'h31 : 8'h30;
+                                5'd11:ui_char_at=8'h20;5'd12:ui_char_at=8'h53;
+                                5'd13:ui_char_at=8'h57;5'd14:ui_char_at=8'h33;
+                                5'd15:ui_char_at=8'h3D;
+                                5'd16:ui_char_at=sw[2] ? 8'h31 : 8'h30;
+                                5'd17:ui_char_at=8'h20;5'd18:ui_char_at=8'h53;
+                                5'd19:ui_char_at=8'h57;5'd20:ui_char_at=8'h34;
+                                5'd21:ui_char_at=8'h3D;
+                                5'd22:ui_char_at=sw[3] ? 8'h31 : 8'h30;
+                                default:ui_char_at=8'h00;
+                            endcase
+                        end else if (line == 5'd8) begin
+                            case (page)
+                                4'd1: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h50;5'd1:ui_char_at=8'h4C;
+                                        5'd2:ui_char_at=8'h41;5'd3:ui_char_at=8'h54;
+                                        5'd4:ui_char_at=8'h45;5'd5:ui_char_at=8'h3A;
+                                        5'd6:ui_char_at=plate_code_char(3'd0,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        5'd7:ui_char_at=plate_code_char(3'd1,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        5'd8:ui_char_at=plate_code_char(3'd2,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        5'd9:ui_char_at=plate_code_char(3'd3,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        5'd10:ui_char_at=plate_code_char(3'd4,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        5'd11:ui_char_at=plate_code_char(3'd5,plate_code0,plate_code1,plate_code2,plate_code3,plate_code4,plate_code5);
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd2: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h58;5'd1:ui_char_at=8'h3A;
+                                        5'd2:ui_char_at=coord_hex_char(track_x_min,2'd0);
+                                        5'd3:ui_char_at=coord_hex_char(track_x_min,2'd1);
+                                        5'd4:ui_char_at=coord_hex_char(track_x_min,2'd2);
+                                        5'd5:ui_char_at=8'h20;5'd6:ui_char_at=8'h59;
+                                        5'd7:ui_char_at=8'h3A;
+                                        5'd8:ui_char_at=coord_hex_char(track_y_min,2'd0);
+                                        5'd9:ui_char_at=coord_hex_char(track_y_min,2'd1);
+                                        5'd10:ui_char_at=coord_hex_char(track_y_min,2'd2);
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd3: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h46;5'd1:ui_char_at=8'h52;
+                                        5'd2:ui_char_at=8'h41;5'd3:ui_char_at=8'h4D;
+                                        5'd4:ui_char_at=8'h45;5'd5:ui_char_at=8'h2D;
+                                        5'd6:ui_char_at=8'h44;5'd7:ui_char_at=8'h49;
+                                        5'd8:ui_char_at=8'h46;5'd9:ui_char_at=8'h46;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd4: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h41;5'd1:ui_char_at=8'h56;
+                                        5'd2:ui_char_at=8'h47;5'd3:ui_char_at=8'h20;
+                                        5'd4:ui_char_at=8'h42;5'd5:ui_char_at=8'h41;
+                                        5'd6:ui_char_at=8'h4C;5'd7:ui_char_at=8'h41;
+                                        5'd8:ui_char_at=8'h4E;5'd9:ui_char_at=8'h43;
+                                        5'd10:ui_char_at=8'h45;default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd5: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h45;5'd1:ui_char_at=8'h56;
+                                        5'd2:ui_char_at=8'h45;5'd3:ui_char_at=8'h4E;
+                                        5'd4:ui_char_at=8'h54;5'd5:ui_char_at=8'h20;
+                                        5'd6:ui_char_at=8'h52;5'd7:ui_char_at=8'h45;
+                                        5'd8:ui_char_at=8'h41;5'd9:ui_char_at=8'h44;
+                                        5'd10:ui_char_at=8'h59;default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd6: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h43;5'd1:ui_char_at=8'h41;
+                                        5'd2:ui_char_at=8'h50;5'd3:ui_char_at=8'h54;
+                                        5'd4:ui_char_at=8'h55;5'd5:ui_char_at=8'h52;
+                                        5'd6:ui_char_at=8'h45;5'd7:ui_char_at=8'h2F;
+                                        5'd8:ui_char_at=8'h44;5'd9:ui_char_at=8'h49;
+                                        5'd10:ui_char_at=8'h53;default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd7: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h50;5'd1:ui_char_at=8'h53;
+                                        5'd2:ui_char_at=8'h45;5'd3:ui_char_at=8'h55;
+                                        5'd4:ui_char_at=8'h44;5'd5:ui_char_at=8'h4F;
+                                        5'd6:ui_char_at=8'h2D;5'd7:ui_char_at=8'h43;
+                                        5'd8:ui_char_at=8'h4F;5'd9:ui_char_at=8'h4C;
+                                        5'd10:ui_char_at=8'h4F;5'd11:ui_char_at=8'h52;
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                default:ui_char_at=8'h00;
+                            endcase
+                        end else if (line == 5'd9) begin
+                            case (page)
+                                4'd1: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h58;5'd1:ui_char_at=8'h3A;
+                                        5'd2:ui_char_at=coord_hex_char(plate_x_min,2'd0);
+                                        5'd3:ui_char_at=coord_hex_char(plate_x_min,2'd1);
+                                        5'd4:ui_char_at=coord_hex_char(plate_x_min,2'd2);
+                                        5'd5:ui_char_at=8'h20;5'd6:ui_char_at=8'h59;
+                                        5'd7:ui_char_at=8'h3A;
+                                        5'd8:ui_char_at=coord_hex_char(plate_y_min,2'd0);
+                                        5'd9:ui_char_at=coord_hex_char(plate_y_min,2'd1);
+                                        5'd10:ui_char_at=coord_hex_char(plate_y_min,2'd2);
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                4'd2: begin
+                                    case(char_cell)
+                                        5'd0:ui_char_at=8'h58;5'd1:ui_char_at=8'h3A;
+                                        5'd2:ui_char_at=coord_hex_char(track_x_max,2'd0);
+                                        5'd3:ui_char_at=coord_hex_char(track_x_max,2'd1);
+                                        5'd4:ui_char_at=coord_hex_char(track_x_max,2'd2);
+                                        5'd5:ui_char_at=8'h20;5'd6:ui_char_at=8'h59;
+                                        5'd7:ui_char_at=8'h3A;
+                                        5'd8:ui_char_at=coord_hex_char(track_y_max,2'd0);
+                                        5'd9:ui_char_at=coord_hex_char(track_y_max,2'd1);
+                                        5'd10:ui_char_at=coord_hex_char(track_y_max,2'd2);
+                                        default:ui_char_at=8'h00;
+                                    endcase
+                                end
+                                default:ui_char_at=8'h00;
+                            endcase
+                        end
+                    end
+                    5'd14: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h4B;5'd1:ui_char_at=8'h31;5'd2:ui_char_at=8'h20;
+                            5'd3:ui_char_at=8'h55;5'd4:ui_char_at=8'h50;5'd5:ui_char_at=8'h20;
+                            5'd6:ui_char_at=8'h4B;5'd7:ui_char_at=8'h32;5'd8:ui_char_at=8'h20;
+                            5'd9:ui_char_at=8'h44;5'd10:ui_char_at=8'h4F;5'd11:ui_char_at=8'h57;
+                            5'd12:ui_char_at=8'h4E;default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    5'd15: begin
+                        case(char_cell)
+                            5'd0:ui_char_at=8'h4B;5'd1:ui_char_at=8'h33;5'd2:ui_char_at=8'h20;
+                            5'd3:ui_char_at=8'h4F;5'd4:ui_char_at=8'h4B;5'd5:ui_char_at=8'h20;
+                            5'd6:ui_char_at=8'h4B;5'd7:ui_char_at=8'h34;5'd8:ui_char_at=8'h20;
+                            5'd9:ui_char_at=8'h42;5'd10:ui_char_at=8'h41;5'd11:ui_char_at=8'h43;
+                            5'd12:ui_char_at=8'h4B;default:ui_char_at=8'h00;
+                        endcase
+                    end
+                    default:ui_char_at=8'h00;
+                endcase
+            end
+        end
+    endfunction
+
+    function [23:0] ui_background;
+        input [10:0] x;
+        input [10:0] y;
+        input [23:0] base;
+        input [3:0]  menu_index;
+        input        in_menu;
+        reg [4:0] line;
+        begin
+            ui_background = base;
+            line = y >> 4;
+            if ((x >= PANEL_X) && (x < (PANEL_X + PANEL_W)) &&
+                (y >= PANEL_Y) && (y < (PANEL_Y + PANEL_H))) begin
+                ui_background = PANEL_BG;
+                if ((x >= PANEL_X) && (x < (PANEL_X + PANEL_W)) &&
+                    (y < 11'd2 || y >= (PANEL_H - 11'd2)))
+                    ui_background = BORDER_COLOR;
+                if (in_menu && (line >= 5'd5) && (line <= 5'd13) &&
+                    ((line - 5'd5) == menu_index))
+                    ui_background = 24'h16466A;
+            end
+        end
+    endfunction
+
+    function detect_box_border;
+        input [10:0] x;
+        input [10:0] y;
+        input [10:0] x_min;
+        input [10:0] x_max;
+        input [10:0] y_min;
+        input [10:0] y_max;
+        begin
+            detect_box_border = 1'b0;
+            if ((x >= x_min) && (x <= x_max) &&
+                (y >= y_min) && (y <= y_max)) begin
+                detect_box_border =
+                    ((x <= x_min + 11'd2) || (x + 11'd2 >= x_max) ||
+                     (y <= y_min + 11'd2) || (y + 11'd2 >= y_max));
+            end
+        end
+    endfunction
+
+    wire [7:0] char0 = ui_char_at(x0, y_pos, I_mode, I_page, I_menu_index,
+                                   I_in_menu, I_fps, I_capture_frame,
+                                   I_display_frame, I_latency_frame, I_switch,
+                                   I_plate_valid, I_plate_x_min, I_plate_x_max,
+                                   I_plate_y_min, I_plate_y_max,
+                                   I_plate_code0, I_plate_code1, I_plate_code2,
+                                   I_plate_code3, I_plate_code4, I_plate_code5,
+                                   I_track_valid, I_track_x_min, I_track_x_max,
+                                   I_track_y_min, I_track_y_max, I_motion_active);
+    wire [7:0] char1 = ui_char_at(x1, y_pos, I_mode, I_page, I_menu_index,
+                                   I_in_menu, I_fps, I_capture_frame,
+                                   I_display_frame, I_latency_frame, I_switch,
+                                   I_plate_valid, I_plate_x_min, I_plate_x_max,
+                                   I_plate_y_min, I_plate_y_max,
+                                   I_plate_code0, I_plate_code1, I_plate_code2,
+                                   I_plate_code3, I_plate_code4, I_plate_code5,
+                                   I_track_valid, I_track_x_min, I_track_x_max,
+                                   I_track_y_min, I_track_y_max, I_motion_active);
+    wire [7:0] char2 = ui_char_at(x2, y_pos, I_mode, I_page, I_menu_index,
+                                   I_in_menu, I_fps, I_capture_frame,
+                                   I_display_frame, I_latency_frame, I_switch,
+                                   I_plate_valid, I_plate_x_min, I_plate_x_max,
+                                   I_plate_y_min, I_plate_y_max,
+                                   I_plate_code0, I_plate_code1, I_plate_code2,
+                                   I_plate_code3, I_plate_code4, I_plate_code5,
+                                   I_track_valid, I_track_x_min, I_track_x_max,
+                                   I_track_y_min, I_track_y_max, I_motion_active);
+    wire [7:0] char3 = ui_char_at(x3, y_pos, I_mode, I_page, I_menu_index,
+                                   I_in_menu, I_fps, I_capture_frame,
+                                   I_display_frame, I_latency_frame, I_switch,
+                                   I_plate_valid, I_plate_x_min, I_plate_x_max,
+                                   I_plate_y_min, I_plate_y_max,
+                                   I_plate_code0, I_plate_code1, I_plate_code2,
+                                   I_plate_code3, I_plate_code4, I_plate_code5,
+                                   I_track_valid, I_track_x_min, I_track_x_max,
+                                   I_track_y_min, I_track_y_max, I_motion_active);
+
+    wire [15:0] bits0;
+    wire [15:0] bits1;
+    wire [15:0] bits2;
+    wire [15:0] bits3;
+    osd_char_lib u_ui_char0(.I_char(char0), .I_row(y_pos[3:0]), .O_row_bits(bits0));
+    osd_char_lib u_ui_char1(.I_char(char1), .I_row(y_pos[3:0]), .O_row_bits(bits1));
+    osd_char_lib u_ui_char2(.I_char(char2), .I_row(y_pos[3:0]), .O_row_bits(bits2));
+    osd_char_lib u_ui_char3(.I_char(char3), .I_row(y_pos[3:0]), .O_row_bits(bits3));
+
+    wire [23:0] bg0 = ui_background(x0, y_pos, I_pix0, I_menu_index, I_in_menu);
+    wire [23:0] bg1 = ui_background(x1, y_pos, I_pix1, I_menu_index, I_in_menu);
+    wire [23:0] bg2 = ui_background(x2, y_pos, I_pix2, I_menu_index, I_in_menu);
+    wire [23:0] bg3 = ui_background(x3, y_pos, I_pix3, I_menu_index, I_in_menu);
+    wire text0 = (char0 != 8'h00) && bits0[4'd15 - x0[3:0]];
+    wire text1 = (char1 != 8'h00) && bits1[4'd15 - x1[3:0]];
+    wire text2 = (char2 != 8'h00) && bits2[4'd15 - x2[3:0]];
+    wire text3 = (char3 != 8'h00) && bits3[4'd15 - x3[3:0]];
+
+    wire [3:0] menu_item0 = menu_item_at(x0, y_pos);
+    wire [3:0] menu_item1 = menu_item_at(x1, y_pos);
+    wire [3:0] menu_item2 = menu_item_at(x2, y_pos);
+    wire [3:0] menu_item3 = menu_item_at(x3, y_pos);
+    wire [7:0] menu_char0 = menu_char_at(x0, y_pos);
+    wire [7:0] menu_char1 = menu_char_at(x1, y_pos);
+    wire [7:0] menu_char2 = menu_char_at(x2, y_pos);
+    wire [7:0] menu_char3 = menu_char_at(x3, y_pos);
+    wire [3:0] menu_row = menu_text_row(y_pos);
+    wire [3:0] menu_col0 = menu_text_col(x0, y_pos);
+    wire [3:0] menu_col1 = menu_text_col(x1, y_pos);
+    wire [3:0] menu_col2 = menu_text_col(x2, y_pos);
+    wire [3:0] menu_col3 = menu_text_col(x3, y_pos);
+    wire [15:0] menu_bits0;
+    wire [15:0] menu_bits1;
+    wire [15:0] menu_bits2;
+    wire [15:0] menu_bits3;
+    osd_char_lib u_menu_char0(.I_char(menu_char0), .I_row(menu_row), .O_row_bits(menu_bits0));
+    osd_char_lib u_menu_char1(.I_char(menu_char1), .I_row(menu_row), .O_row_bits(menu_bits1));
+    osd_char_lib u_menu_char2(.I_char(menu_char2), .I_row(menu_row), .O_row_bits(menu_bits2));
+    osd_char_lib u_menu_char3(.I_char(menu_char3), .I_row(menu_row), .O_row_bits(menu_bits3));
+    wire menu_text0 = (menu_char0 != 8'h00) && menu_bits0[4'd15 - menu_col0];
+    wire menu_text1 = (menu_char1 != 8'h00) && menu_bits1[4'd15 - menu_col1];
+    wire menu_text2 = (menu_char2 != 8'h00) && menu_bits2[4'd15 - menu_col2];
+    wire menu_text3 = (menu_char3 != 8'h00) && menu_bits3[4'd15 - menu_col3];
+    wire menu_logo0 = menu_logo_on(x0, y_pos);
+    wire menu_logo1 = menu_logo_on(x1, y_pos);
+    wire menu_logo2 = menu_logo_on(x2, y_pos);
+    wire menu_logo3 = menu_logo_on(x3, y_pos);
+    wire menu_icon0 = menu_icon_on(x0, y_pos, menu_item0);
+    wire menu_icon1 = menu_icon_on(x1, y_pos, menu_item1);
+    wire menu_icon2 = menu_icon_on(x2, y_pos, menu_item2);
+    wire menu_icon3 = menu_icon_on(x3, y_pos, menu_item3);
+    wire [23:0] menu_bg0 = menu_background(x0, y_pos, I_menu_index);
+    wire [23:0] menu_bg1 = menu_background(x1, y_pos, I_menu_index);
+    wire [23:0] menu_bg2 = menu_background(x2, y_pos, I_menu_index);
+    wire [23:0] menu_bg3 = menu_background(x3, y_pos, I_menu_index);
+    wire [23:0] menu_pix0 = menu_logo0 ? menu_logo_color(x0, y_pos) :
+                           (menu_icon0 ? menu_icon_color(menu_item0, x0, y_pos) :
+                           (menu_text0 ? menu_text_color(y_pos, menu_item0, I_menu_index) : menu_bg0));
+    wire [23:0] menu_pix1 = menu_logo1 ? menu_logo_color(x1, y_pos) :
+                           (menu_icon1 ? menu_icon_color(menu_item1, x1, y_pos) :
+                           (menu_text1 ? menu_text_color(y_pos, menu_item1, I_menu_index) : menu_bg1));
+    wire [23:0] menu_pix2 = menu_logo2 ? menu_logo_color(x2, y_pos) :
+                           (menu_icon2 ? menu_icon_color(menu_item2, x2, y_pos) :
+                           (menu_text2 ? menu_text_color(y_pos, menu_item2, I_menu_index) : menu_bg2));
+    wire [23:0] menu_pix3 = menu_logo3 ? menu_logo_color(x3, y_pos) :
+                           (menu_icon3 ? menu_icon_color(menu_item3, x3, y_pos) :
+                           (menu_text3 ? menu_text_color(y_pos, menu_item3, I_menu_index) : menu_bg3));
+
+    wire selected_line0 = I_in_menu && ((y_pos >> 4) >= 5'd5) &&
+                          ((y_pos >> 4) <= 5'd13) &&
+                          (((y_pos >> 4) - 5'd5) == I_menu_index);
+    wire box_plate0 = !I_in_menu && I_plate_valid && (I_page == 4'd1) &&
+                      detect_box_border(x0, y_pos, I_plate_x_min, I_plate_x_max,
+                                        I_plate_y_min, I_plate_y_max);
+    wire box_plate1 = !I_in_menu && I_plate_valid && (I_page == 4'd1) &&
+                      detect_box_border(x1, y_pos, I_plate_x_min, I_plate_x_max,
+                                        I_plate_y_min, I_plate_y_max);
+    wire box_plate2 = !I_in_menu && I_plate_valid && (I_page == 4'd1) &&
+                      detect_box_border(x2, y_pos, I_plate_x_min, I_plate_x_max,
+                                        I_plate_y_min, I_plate_y_max);
+    wire box_plate3 = !I_in_menu && I_plate_valid && (I_page == 4'd1) &&
+                      detect_box_border(x3, y_pos, I_plate_x_min, I_plate_x_max,
+                                        I_plate_y_min, I_plate_y_max);
+    wire box_track0 = !I_in_menu && I_track_valid && (I_page == 4'd2) &&
+                      detect_box_border(x0, y_pos, I_track_x_min, I_track_x_max,
+                                        I_track_y_min, I_track_y_max);
+    wire box_track1 = !I_in_menu && I_track_valid && (I_page == 4'd2) &&
+                      detect_box_border(x1, y_pos, I_track_x_min, I_track_x_max,
+                                        I_track_y_min, I_track_y_max);
+    wire box_track2 = !I_in_menu && I_track_valid && (I_page == 4'd2) &&
+                      detect_box_border(x2, y_pos, I_track_x_min, I_track_x_max,
+                                        I_track_y_min, I_track_y_max);
+    wire box_track3 = !I_in_menu && I_track_valid && (I_page == 4'd2) &&
+                      detect_box_border(x3, y_pos, I_track_x_min, I_track_x_max,
+                                        I_track_y_min, I_track_y_max);
+    wire [23:0] box_plate_color = 24'h00FFFF;
+    wire [23:0] box_track_color = 24'hFF3030;
+    wire [23:0] panel_pix0 = box_plate0 ? box_plate_color :
+                             (box_track0 ? box_track_color :
+                             ((I_osd_en && text0) ? (selected_line0 ? SELECT_COLOR : TEXT_COLOR) : bg0));
+    wire [23:0] panel_pix1 = box_plate1 ? box_plate_color :
+                             (box_track1 ? box_track_color :
+                             ((I_osd_en && text1) ? (selected_line0 ? SELECT_COLOR : TEXT_COLOR) : bg1));
+    wire [23:0] panel_pix2 = box_plate2 ? box_plate_color :
+                             (box_track2 ? box_track_color :
+                             ((I_osd_en && text2) ? (selected_line0 ? SELECT_COLOR : TEXT_COLOR) : bg2));
+    wire [23:0] panel_pix3 = box_plate3 ? box_plate_color :
+                             (box_track3 ? box_track_color :
+                             ((I_osd_en && text3) ? (selected_line0 ? SELECT_COLOR : TEXT_COLOR) : bg3));
+    wire [23:0] pix0 = I_in_menu ? menu_pix0 : panel_pix0;
+    wire [23:0] pix1 = I_in_menu ? menu_pix1 : panel_pix1;
+    wire [23:0] pix2 = I_in_menu ? menu_pix2 : panel_pix2;
+    wire [23:0] pix3 = I_in_menu ? menu_pix3 : panel_pix3;
+
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_tlast  <= 1'b0;
+            O_tuser  <= 1'b0;
+            O_tdata  <= 96'd0;
+            O_tvalid <= 1'b0;
+            x_grp    <= 9'd0;
+            y_pos    <= 11'd0;
+        end else begin
+            O_tlast  <= I_tlast;
+            O_tuser  <= I_tuser;
+            O_tvalid <= I_tvalid;
+
+            if (I_tvalid && I_tready)
+                O_tdata <= {pix0, pix1, pix2, pix3};
+            else if (!I_tvalid)
+                O_tdata <= 96'd0;
+
+            if (I_tvalid && I_tready) begin
+                if (I_tuser) begin
+                    x_grp <= 9'd1;
+                    y_pos <= 11'd0;
+                end else if (I_tlast) begin
+                    x_grp <= 9'd0;
+                    y_pos <= (y_pos == (IMG_HEIGHT - 1)) ? 11'd0 : y_pos + 11'd1;
+                end else begin
+                    x_grp <= x_grp + 9'd1;
+                end
+            end
+        end
+    end
+
+endmodule

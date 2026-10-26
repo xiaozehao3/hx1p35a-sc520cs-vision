@@ -1,0 +1,396 @@
+//===========================================================================
+//  my_osd.v  --  4-pixel parallel OSD, using the real example Logo ROM
+//
+//  OSD layout for the 1280x720 camera image:
+//    * real Anlogic blue/red logo: 160 x 160 at the top-left (0, 0)
+//    * current algorithm label below the logo, for example "M0 SOBEL"
+//    * the example Chinese "安路" glyphs at the bottom-left
+//
+//  The logo data is copied from lab_ex3_osd_SC500_720P/anlogic_logo_rom.v.
+//  The text glyphs are read from the example-style osd_char_lib.v.  A zero
+//  bit in the ROM/font is transparent, so the camera/processed pixel remains
+//  visible underneath.  I_osd_en is latched at frame boundaries in isp_top,
+//  preventing a half-frame OSD change.
+//===========================================================================
+module my_osd #(
+    parameter IMG_WIDTH  = 1280,
+    parameter IMG_HEIGHT = 720
+)(
+    input               I_clk,
+    input               I_rst_n,
+    input               I_tlast,
+    input               I_tuser,
+    input      [95:0]   I_tdata,
+    input               I_tvalid,
+    input               I_tready,
+    output reg          O_tlast,
+    output reg          O_tuser,
+    output reg [95:0]   O_tdata,
+    output reg          O_tvalid,
+    output              O_tready,
+
+    // Kept for interface compatibility with the existing ISP top.
+    input      [1:0]    I_mode,
+    input      [7:0]    I_luma_avg,
+    input               I_osd_en
+);
+
+    // The block is a one-beat pipeline with no internal buffering.
+    assign O_tready = I_tready;
+
+    localparam [10:0] LOGO_W = 11'd160;
+    localparam [10:0] LOGO_H = 11'd160;
+
+    // The mode label is directly below the 160x160 logo.
+    localparam [10:0] MODE_X = 11'd8;
+    localparam [10:0] MODE_Y = 11'd168;
+    localparam [10:0] MODE_W = 11'd160;
+    localparam [10:0] MODE_H = 11'd24;
+
+    // The example-style Chinese glyphs are placed at the bottom-left.
+    localparam [10:0] BRAND_X = 11'd16;
+    localparam [10:0] BRAND_Y = IMG_HEIGHT - 11'd60;
+    localparam [10:0] BRAND_W = 11'd48;
+    localparam [10:0] BRAND_H = 11'd24;
+
+    localparam [23:0] TEXT_COLOR = 24'hfff200;
+
+    // One stream beat contains pixels from left to right as follows:
+    //   [95:72] pixel 0, [71:48] pixel 1, [47:24] pixel 2, [23:0] pixel 3.
+    wire [23:0] I_pix0 = I_tdata[95:72];
+    wire [23:0] I_pix1 = I_tdata[71:48];
+    wire [23:0] I_pix2 = I_tdata[47:24];
+    wire [23:0] I_pix3 = I_tdata[23:0];
+
+    // x_grp is the group number within a line; y_pos is the active line.
+    reg [8:0]  x_grp;
+    reg [10:0] y_pos;
+    wire [10:0] x_base = {x_grp, 2'b00};
+    wire [10:0] x0 = x_base;
+    wire [10:0] x1 = x_base + 11'd1;
+    wire [10:0] x2 = x_base + 11'd2;
+    wire [10:0] x3 = x_base + 11'd3;
+
+    // ----------------------------------------------------------------------
+    // Real 160x160 example logo ROM.  The ROM is sparse; bit[24] is the
+    // valid/opaque flag and bits[23:0] are RGB888.
+    // ----------------------------------------------------------------------
+    wire logo_region0 = (x0 < LOGO_W) && (y_pos < LOGO_H);
+    wire logo_region1 = (x1 < LOGO_W) && (y_pos < LOGO_H);
+    wire logo_region2 = (x2 < LOGO_W) && (y_pos < LOGO_H);
+    wire logo_region3 = (x3 < LOGO_W) && (y_pos < LOGO_H);
+
+    wire [14:0] logo_addr0;
+    wire [14:0] logo_addr1;
+    wire [14:0] logo_addr2;
+    wire [14:0] logo_addr3;
+
+    // y*160 = y*128 + y*32.  The explicit zero extension prevents the
+    // shift from being truncated to the 11-bit coordinate width.
+    assign logo_addr0 = ({4'd0, y_pos} << 7) +
+                        ({4'd0, y_pos} << 5) + {4'd0, x0};
+    assign logo_addr1 = ({4'd0, y_pos} << 7) +
+                        ({4'd0, y_pos} << 5) + {4'd0, x1};
+    assign logo_addr2 = ({4'd0, y_pos} << 7) +
+                        ({4'd0, y_pos} << 5) + {4'd0, x2};
+    assign logo_addr3 = ({4'd0, y_pos} << 7) +
+                        ({4'd0, y_pos} << 5) + {4'd0, x3};
+
+    wire [24:0] logo_pixel0;
+    wire [24:0] logo_pixel1;
+    wire [24:0] logo_pixel2;
+    wire [24:0] logo_pixel3;
+
+    anlogic_logo_rom u_logo0 (
+        .I_addr  (logo_addr0),
+        .O_pixel (logo_pixel0)
+    );
+    anlogic_logo_rom u_logo1 (
+        .I_addr  (logo_addr1),
+        .O_pixel (logo_pixel1)
+    );
+    anlogic_logo_rom u_logo2 (
+        .I_addr  (logo_addr2),
+        .O_pixel (logo_pixel2)
+    );
+    anlogic_logo_rom u_logo3 (
+        .I_addr  (logo_addr3),
+        .O_pixel (logo_pixel3)
+    );
+
+    // ----------------------------------------------------------------------
+    // Text layout helpers.
+    //
+    // The 16x16 glyphs are displayed in a 16x24 cell.  Chinese "安路" uses
+    // a 24-pixel-wide cell, matching the example's enlarged glyphs.  The
+    // mode label changes with I_mode:
+    //   M0 SOBEL, M1 GRAY, M2 BINARY, M3 COLOR
+    // ----------------------------------------------------------------------
+    function [7:0] brand_char_at;
+        input [10:0] x;
+        reg [10:0] dx;
+        begin
+            brand_char_at = 8'h00;
+            dx = 11'd0;
+            if ((x >= BRAND_X) && (x < (BRAND_X + BRAND_W))) begin
+                dx = x - BRAND_X;
+                if (dx < 11'd24)
+                    brand_char_at = 8'h80;       // 安
+                else
+                    brand_char_at = 8'h81;       // 路
+            end
+        end
+    endfunction
+
+    function [7:0] mode_char_at;
+        input [10:0] x;
+        input [1:0]  md;
+        reg [10:0] dx;
+        reg [3:0]  idx;
+        begin
+            mode_char_at = 8'h00;
+            dx = 11'd0;
+            idx = 4'd0;
+            if ((x >= MODE_X) && (x < (MODE_X + MODE_W))) begin
+                dx  = x - MODE_X;
+                idx = dx >> 4;
+                case (md)
+                    2'd0: begin
+                        case (idx)
+                            4'd0: mode_char_at = 8'h4d; // M
+                            4'd1: mode_char_at = 8'h30; // 0
+                            4'd3: mode_char_at = 8'h53; // S
+                            4'd4: mode_char_at = 8'h4f; // O
+                            4'd5: mode_char_at = 8'h42; // B
+                            4'd6: mode_char_at = 8'h45; // E
+                            4'd7: mode_char_at = 8'h4c; // L
+                            default: mode_char_at = 8'h00;
+                        endcase
+                    end
+                    2'd1: begin
+                        case (idx)
+                            4'd0: mode_char_at = 8'h4d; // M
+                            4'd1: mode_char_at = 8'h31; // 1
+                            4'd3: mode_char_at = 8'h47; // G
+                            4'd4: mode_char_at = 8'h52; // R
+                            4'd5: mode_char_at = 8'h41; // A
+                            4'd6: mode_char_at = 8'h59; // Y
+                            default: mode_char_at = 8'h00;
+                        endcase
+                    end
+                    2'd2: begin
+                        case (idx)
+                            4'd0: mode_char_at = 8'h4d; // M
+                            4'd1: mode_char_at = 8'h32; // 2
+                            4'd3: mode_char_at = 8'h42; // B
+                            4'd4: mode_char_at = 8'h49; // I
+                            4'd5: mode_char_at = 8'h4e; // N
+                            4'd6: mode_char_at = 8'h41; // A
+                            4'd7: mode_char_at = 8'h52; // R
+                            4'd8: mode_char_at = 8'h59; // Y
+                            default: mode_char_at = 8'h00;
+                        endcase
+                    end
+                    default: begin
+                        case (idx)
+                            4'd0: mode_char_at = 8'h4d; // M
+                            4'd1: mode_char_at = 8'h33; // 3
+                            4'd3: mode_char_at = 8'h43; // C
+                            4'd4: mode_char_at = 8'h4f; // O
+                            4'd5: mode_char_at = 8'h4c; // L
+                            4'd6: mode_char_at = 8'h4f; // O
+                            4'd7: mode_char_at = 8'h52; // R
+                            default: mode_char_at = 8'h00;
+                        endcase
+                    end
+                endcase
+            end
+        end
+    endfunction
+
+    function [7:0] text_char_at;
+        input [10:0] x;
+        input [10:0] y;
+        input [1:0]  md;
+        begin
+            text_char_at = 8'h00;
+            if ((y >= MODE_Y) && (y < (MODE_Y + MODE_H)))
+                text_char_at = mode_char_at(x, md);
+            else if ((y >= BRAND_Y) && (y < (BRAND_Y + BRAND_H)))
+                text_char_at = brand_char_at(x);
+        end
+    endfunction
+
+    function [3:0] text_row_at;
+        input [10:0] y;
+        reg [10:0] dy;
+        begin
+            text_row_at = 4'd0;
+            dy = 11'd0;
+            if ((y >= MODE_Y) && (y < (MODE_Y + MODE_H)))
+                dy = y - MODE_Y;
+            else if ((y >= BRAND_Y) && (y < (BRAND_Y + BRAND_H)))
+                dy = y - BRAND_Y;
+
+            if (dy >= 11'd2)
+                text_row_at = ((dy - 11'd2) * 16) / 24;
+        end
+    endfunction
+
+    function [3:0] text_col_at;
+        input [10:0] x;
+        input [10:0] y;
+        reg [10:0] dx;
+        begin
+            text_col_at = 4'd0;
+            dx = 11'd0;
+            if ((y >= MODE_Y) && (y < (MODE_Y + MODE_H)) &&
+                (x >= MODE_X) && (x < (MODE_X + MODE_W))) begin
+                dx = x - MODE_X;
+                text_col_at = dx[3:0];
+            end else if ((y >= BRAND_Y) && (y < (BRAND_Y + BRAND_H)) &&
+                         (x >= BRAND_X) && (x < (BRAND_X + BRAND_W))) begin
+                dx = x - BRAND_X;
+                text_col_at = (dx * 16) / 24;
+            end
+        end
+    endfunction
+
+    function text_row_bit;
+        input [15:0] row_bits;
+        input [3:0]  col;
+        begin
+            case (col)
+                4'd0:  text_row_bit = row_bits[15];
+                4'd1:  text_row_bit = row_bits[14];
+                4'd2:  text_row_bit = row_bits[13];
+                4'd3:  text_row_bit = row_bits[12];
+                4'd4:  text_row_bit = row_bits[11];
+                4'd5:  text_row_bit = row_bits[10];
+                4'd6:  text_row_bit = row_bits[9];
+                4'd7:  text_row_bit = row_bits[8];
+                4'd8:  text_row_bit = row_bits[7];
+                4'd9:  text_row_bit = row_bits[6];
+                4'd10: text_row_bit = row_bits[5];
+                4'd11: text_row_bit = row_bits[4];
+                4'd12: text_row_bit = row_bits[3];
+                4'd13: text_row_bit = row_bits[2];
+                4'd14: text_row_bit = row_bits[1];
+                4'd15: text_row_bit = row_bits[0];
+                default: text_row_bit = 1'b0;
+            endcase
+        end
+    endfunction
+
+    wire [7:0] text_char0 = text_char_at(x0, y_pos, I_mode);
+    wire [7:0] text_char1 = text_char_at(x1, y_pos, I_mode);
+    wire [7:0] text_char2 = text_char_at(x2, y_pos, I_mode);
+    wire [7:0] text_char3 = text_char_at(x3, y_pos, I_mode);
+    wire [3:0] text_row = text_row_at(y_pos);
+    wire [3:0] text_col0 = text_col_at(x0, y_pos);
+    wire [3:0] text_col1 = text_col_at(x1, y_pos);
+    wire [3:0] text_col2 = text_col_at(x2, y_pos);
+    wire [3:0] text_col3 = text_col_at(x3, y_pos);
+
+    wire [15:0] text_bits0;
+    wire [15:0] text_bits1;
+    wire [15:0] text_bits2;
+    wire [15:0] text_bits3;
+
+    osd_char_lib u_char0 (
+        .I_char     (text_char0),
+        .I_row      (text_row),
+        .O_row_bits (text_bits0)
+    );
+    osd_char_lib u_char1 (
+        .I_char     (text_char1),
+        .I_row      (text_row),
+        .O_row_bits (text_bits1)
+    );
+    osd_char_lib u_char2 (
+        .I_char     (text_char2),
+        .I_row      (text_row),
+        .O_row_bits (text_bits2)
+    );
+    osd_char_lib u_char3 (
+        .I_char     (text_char3),
+        .I_row      (text_row),
+        .O_row_bits (text_bits3)
+    );
+
+    wire text_region0 =
+        (((x0 >= MODE_X) && (x0 < (MODE_X + MODE_W)) &&
+          (y_pos >= MODE_Y) && (y_pos < (MODE_Y + MODE_H))) ||
+         ((x0 >= BRAND_X) && (x0 < (BRAND_X + BRAND_W)) &&
+          (y_pos >= BRAND_Y) && (y_pos < (BRAND_Y + BRAND_H))));
+    wire text_region1 =
+        (((x1 >= MODE_X) && (x1 < (MODE_X + MODE_W)) &&
+          (y_pos >= MODE_Y) && (y_pos < (MODE_Y + MODE_H))) ||
+         ((x1 >= BRAND_X) && (x1 < (BRAND_X + BRAND_W)) &&
+          (y_pos >= BRAND_Y) && (y_pos < (BRAND_Y + BRAND_H))));
+    wire text_region2 =
+        (((x2 >= MODE_X) && (x2 < (MODE_X + MODE_W)) &&
+          (y_pos >= MODE_Y) && (y_pos < (MODE_Y + MODE_H))) ||
+         ((x2 >= BRAND_X) && (x2 < (BRAND_X + BRAND_W)) &&
+          (y_pos >= BRAND_Y) && (y_pos < (BRAND_Y + BRAND_H))));
+    wire text_region3 =
+        (((x3 >= MODE_X) && (x3 < (MODE_X + MODE_W)) &&
+          (y_pos >= MODE_Y) && (y_pos < (MODE_Y + MODE_H))) ||
+         ((x3 >= BRAND_X) && (x3 < (BRAND_X + BRAND_W)) &&
+          (y_pos >= BRAND_Y) && (y_pos < (BRAND_Y + BRAND_H))));
+
+    wire text_on0 = text_region0 && text_row_bit(text_bits0, text_col0);
+    wire text_on1 = text_region1 && text_row_bit(text_bits1, text_col1);
+    wire text_on2 = text_region2 && text_row_bit(text_bits2, text_col2);
+    wire text_on3 = text_region3 && text_row_bit(text_bits3, text_col3);
+
+    wire [23:0] O_pix0 = (I_osd_en && logo_region0 && logo_pixel0[24]) ?
+                         logo_pixel0[23:0] :
+                         ((I_osd_en && text_on0) ? TEXT_COLOR : I_pix0);
+    wire [23:0] O_pix1 = (I_osd_en && logo_region1 && logo_pixel1[24]) ?
+                         logo_pixel1[23:0] :
+                         ((I_osd_en && text_on1) ? TEXT_COLOR : I_pix1);
+    wire [23:0] O_pix2 = (I_osd_en && logo_region2 && logo_pixel2[24]) ?
+                         logo_pixel2[23:0] :
+                         ((I_osd_en && text_on2) ? TEXT_COLOR : I_pix2);
+    wire [23:0] O_pix3 = (I_osd_en && logo_region3 && logo_pixel3[24]) ?
+                         logo_pixel3[23:0] :
+                         ((I_osd_en && text_on3) ? TEXT_COLOR : I_pix3);
+
+    // One-cycle stream register.  The current design runs with continuous
+    // ready, but the coordinate counters still advance only on a handshake.
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_tlast  <= 1'b0;
+            O_tuser  <= 1'b0;
+            O_tdata  <= 96'd0;
+            O_tvalid <= 1'b0;
+            x_grp    <= 9'd0;
+            y_pos    <= 11'd0;
+        end else begin
+            O_tlast  <= I_tlast;
+            O_tuser  <= I_tuser;
+            O_tvalid <= I_tvalid;
+
+            if (I_tvalid && I_tready)
+                O_tdata <= {O_pix0, O_pix1, O_pix2, O_pix3};
+            else if (!I_tvalid)
+                O_tdata <= 96'd0;
+
+            if (I_tvalid && I_tready) begin
+                if (I_tuser) begin
+                    // The first beat of a frame is x=0,y=0.
+                    x_grp <= 9'd1;
+                    y_pos <= 11'd0;
+                end else if (I_tlast) begin
+                    x_grp <= 9'd0;
+                    y_pos <= (y_pos == (IMG_HEIGHT - 1)) ? 11'd0 :
+                             (y_pos + 11'd1);
+                end else begin
+                    x_grp <= x_grp + 9'd1;
+                end
+            end
+        end
+    end
+
+endmodule

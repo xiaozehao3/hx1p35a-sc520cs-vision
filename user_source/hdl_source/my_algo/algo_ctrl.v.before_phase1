@@ -1,0 +1,25 @@
+//===========================================================================
+//  algo_ctrl.v  ——  按键控制：切换算法模式 / 开关 OSD
+//  I_mode_trig / I_osd_trig 必须是"消抖后每按一次产生一拍高电平"的脉冲
+//  （工程里用原厂的 key_remove_shakes 产生）
+//===========================================================================
+module algo_ctrl(
+    input               I_clk,
+    input               I_rst_n,
+    input               I_mode_trig,
+    input               I_osd_trig,
+    output reg [1:0]    O_mode,
+    output reg          O_osd_en
+);
+
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_mode   <= 2'd3;      // 上电默认：彩色直通，便于先确认摄像头画面
+            O_osd_en <= 1'b1;      // 上电默认：开 OSD
+        end else begin
+            if (I_mode_trig) O_mode   <= O_mode + 2'd1;   // 0→1→2→3→0 循环
+            if (I_osd_trig)  O_osd_en <= ~O_osd_en;
+        end
+    end
+
+endmodule

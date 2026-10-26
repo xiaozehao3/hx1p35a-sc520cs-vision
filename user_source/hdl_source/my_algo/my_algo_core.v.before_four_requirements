@@ -1,0 +1,133 @@
+//===========================================================================
+//  my_algo_core.v  ——  亮度自适应阈值二值化 / 海报化
+//  ---------------------------------------------------------------------
+//  与参考例程的区别（参赛要求：算法不能与参考实例相同）：
+//    参考例程 edge_detect_96.v 做的是「固定阈值 Sobel 边缘提取」；
+//    本模块做的是「亮度自适应阈值二值化 + 双色/海报化输出」，
+//    阈值不是常数，而是来自画面亮度的滑动平均值，能自动适应光照变化。
+//
+//  数据接口与原厂例程完全一致，可直接替换 isp_top.v 里的 edge_detect_96：
+//    每拍 4 个 RGB888 像素，共 96 bit
+//    I_tdata[95:72] = 像素0   [71:48] = 像素1   [47:24] = 像素2   [23:0] = 像素3
+//    tuser = 帧起始，tlast = 行结束，tvalid/tready 同 AXI4-Stream
+//    本模块不做行缓存、不反压，输出数据比输入晚 1 拍（与参考例程一致）
+//
+//  模式 I_mode：
+//    0 = 二值化(白底黑字)   1 = 反色二值化(黑底白字)
+//    2 = 海报化(前景量化上色 + 暗背景)   3 = 直通(原始彩图)
+//===========================================================================
+module my_algo_core #(
+    parameter IMG_WIDTH  = 1280,
+    parameter IMG_HEIGHT = 720
+)(
+    input               I_clk,
+    input               I_rst_n,
+    input               I_tlast,
+    input               I_tuser,
+    input      [95:0]   I_tdata,
+    input               I_tvalid,
+    input               I_tready,
+    output reg          O_tlast,
+    output reg          O_tuser,
+    output reg [95:0]   O_tdata,
+    output reg          O_tvalid,
+    output              O_tready,
+
+    input      [1:0]    I_mode,         // 工作模式，按键切换
+    input      [7:0]    I_th_offset,    // 阈值偏移：正值让画面更白，负值更黑
+    output reg [7:0]    O_luma_avg      // 当前自适应阈值，送 OSD 显示
+);
+
+    assign O_tready = I_tready;
+
+    //---------------- 1. 取 4 个像素 ----------------
+    wire [23:0] pix0 = I_tdata[95:72];
+    wire [23:0] pix1 = I_tdata[71:48];
+    wire [23:0] pix2 = I_tdata[47:24];
+    wire [23:0] pix3 = I_tdata[23:0];
+
+    //---------------- 2. RGB 转灰度 ----------------
+    // BT.601 定点近似：Y = (77*R + 150*G + 29*B) / 256
+    // 与参考例程的 R/4+G/2+B/4 近似不同，权重更贴近人眼感知
+    function [7:0] luma8;
+        input [23:0] p;
+        reg   [15:0] s;
+        begin
+            s = p[23:16] * 16'd77 + p[15:8] * 16'd150 + p[7:0] * 16'd29;
+            luma8 = s[15:8];
+        end
+    endfunction
+
+    wire [7:0] g0 = luma8(pix0);
+    wire [7:0] g1 = luma8(pix1);
+    wire [7:0] g2 = luma8(pix2);
+    wire [7:0] g3 = luma8(pix3);
+
+    //---------------- 3. 亮度滑动平均（自适应阈值的来源）----------------
+    wire [9:0] beat_sum = {2'b00, g0} + {2'b00, g1} + {2'b00, g2} + {2'b00, g3};
+    wire [7:0] beat_avg = beat_sum[9:2];              // 本拍 4 像素平均亮度
+
+    reg  [7:0] luma_avg;
+    wire [7:0] luma_diff = (beat_avg > luma_avg) ? (beat_avg - luma_avg)
+                                                 : (luma_avg - beat_avg);
+    wire [7:0] luma_step = (luma_diff >> 3) == 8'd0 ? 8'd1 : (luma_diff >> 3);
+    wire [7:0] luma_next = (beat_avg > luma_avg) ? (luma_avg + luma_step)
+                                                 : (luma_avg - luma_step);
+
+    //---------------- 4. 当前阈值 = 滑动平均 + 偏移（限幅 0~255）----------------
+    wire [8:0] th_sum = {1'b0, luma_avg} + {1'b0, I_th_offset};
+    wire [7:0] th_cur = (th_sum > 9'd255) ? 8'd255 : th_sum[7:0];
+
+    //---------------- 5. 逐像素处理 ----------------
+    function [23:0] proc_pix;
+        input [23:0] p;
+        input [7:0]  g;
+        input [7:0]  th;
+        input [1:0]  md;
+        reg          fg;
+        begin
+            fg = (g >= th);
+            case (md)
+                // 二值化：亮于阈值给白色，否则黑色
+                2'd0: proc_pix = fg ? 24'hFFFFFF : 24'h000000;
+                // 反色二值化
+                2'd1: proc_pix = fg ? 24'h000000 : 24'hFFFFFF;
+                // 海报化：前景保留原色但每通道量化成 16 级，背景压暗
+                2'd2: proc_pix = fg ? {p[23:20], p[23:20], p[15:12], p[15:12],
+                                       p[7:4],   p[7:4]}
+                                    : 24'h101820;
+                // 直通
+                default: proc_pix = p;
+            endcase
+        end
+    endfunction
+
+    wire [23:0] q0 = proc_pix(pix0, g0, th_cur, I_mode);
+    wire [23:0] q1 = proc_pix(pix1, g1, th_cur, I_mode);
+    wire [23:0] q2 = proc_pix(pix2, g2, th_cur, I_mode);
+    wire [23:0] q3 = proc_pix(pix3, g3, th_cur, I_mode);
+
+    //---------------- 6. 输出寄存（与参考例程同样的 1 拍延迟）----------------
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_tlast    <= 1'b0;
+            O_tuser    <= 1'b0;
+            O_tdata    <= 96'd0;
+            O_tvalid   <= 1'b0;
+            luma_avg   <= 8'd96;
+            O_luma_avg <= 8'd96;
+        end else begin
+            O_tlast  <= I_tlast;
+            O_tuser  <= I_tuser;
+            O_tvalid <= I_tvalid;
+            if (I_tvalid) begin
+                luma_avg   <= luma_next;
+                O_luma_avg <= luma_avg;
+                O_tdata    <= {q0, q1, q2, q3};
+            end else begin
+                O_tdata    <= 96'd0;
+            end
+        end
+    end
+
+endmodule

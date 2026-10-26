@@ -1,0 +1,176 @@
+// Minimal camera display path.
+//
+// RAW10 -> AXI stream -> Bayer demosaic -> packed RGB888 -> optional OSD
+// -> contiguous RGB888 DDR stream.
+//
+// The demosaic block outputs four RGB pixels in four 32-bit words.  The
+// padding byte in each word must be removed before video_in writes DDR,
+// because video_out reads a continuous stream of 24-bit RGB pixels.
+module isp_top (
+    input               axi4s_video_aclk,
+    input               I_rst_n,
+    input               I_tlast,
+    input               I_tuser,
+    input      [39:0]   I_tdata,
+    input               I_tvalid,
+    input      [9:0]    I_tdest,
+    input               O_tready,
+    output     [127:0]  O_tdata,
+    output              O_tlast,
+    output              O_tuser,
+    output              O_tvalid,
+    output              I_tready,
+
+    // Kept in the interface for the later algorithm stages.
+    input      [1:0]    I_algo_mode,
+    input      [7:0]    I_algo_th_offset,
+    input               I_osd_en
+);
+
+    wire        S_demosaic_tlast;
+    wire        S_demosaic_tuser;
+    wire [127:0] S_demosaic_tdata;
+    wire        S_demosaic_tvalid;
+    wire        S_demosaic_tready;
+
+    wire [95:0]  S_rgb96_raw;
+    wire [95:0]  S_rgb96;
+    wire         S_osd_tlast;
+    wire         S_osd_tuser;
+    wire [95:0]  S_osd_tdata;
+    wire         S_osd_tvalid;
+    wire         S_osd_tready;
+
+    wire         S_packed_tlast;
+    wire         S_packed_tuser;
+    wire [127:0] S_packed_tdata;
+    wire         S_packed_tvalid;
+
+    demosaic #(
+        .IMG_HEIGHT          (720),
+        .IMG_WIDTH           (1280),
+        .data_complete_delay (50),
+        .BAYER_MODE          ("BGGR")
+    ) u_demosaic (
+        .I_clk              (axi4s_video_aclk),
+        .I_rst_n            (I_rst_n),
+        .axi4s_video_tdata  (I_tdata),
+        .axi4s_video_tdest  (I_tdest),
+        .axi4s_video_tlast  (I_tlast),
+        .axi4s_video_tvalid (I_tvalid),
+        .axi4s_video_tuser  (I_tuser),
+        .axi4s_video_tready (I_tready),
+        .O_tlast            (S_demosaic_tlast),
+        .O_tuser            (S_demosaic_tuser),
+        .O_tdata            (S_demosaic_tdata),
+        .O_tvalid           (S_demosaic_tvalid),
+        .O_tready           (S_demosaic_tready)
+    );
+
+    // video_in has no back-pressure signal on the camera side.  Keep the
+    // demosaic/OSD stream running continuously for this first bring-up.
+    assign S_demosaic_tready = O_tready;
+
+    // Remove the padding byte from each demosaic RGB word.  The result is
+    // four RGB888 pixels in 96 bits, ordered from left to right.
+    data128_96 u_data128_96 (
+        .I_tdata (S_demosaic_tdata),
+        .O_tdata (S_rgb96_raw)
+    );
+
+    // The replacement lens produces a noticeable green cast.  Apply a small
+    // fixed white-balance correction before the frame is written to DDR.
+    // This is intentionally combinational: no video-valid or line/frame
+    // timing is changed, and the correction costs no extra stream latency.
+    function [7:0] correct_red;
+        input [7:0] value;
+        reg [15:0] scaled;
+        begin
+            scaled = value + (value >> 2);       // 1.25x red
+            correct_red = (scaled > 16'd255) ? 8'd255 : scaled[7:0];
+        end
+    endfunction
+
+    function [7:0] correct_green;
+        input [7:0] value;
+        begin
+            correct_green = value - (value >> 4); // 0.9375x green
+        end
+    endfunction
+
+    function [7:0] correct_blue;
+        input [7:0] value;
+        reg [15:0] scaled;
+        begin
+            scaled = value + (value >> 2);       // 1.25x blue
+            correct_blue = (scaled > 16'd255) ? 8'd255 : scaled[7:0];
+        end
+    endfunction
+
+    assign S_rgb96 = {
+        correct_red  (S_rgb96_raw[95:88]),
+        correct_green(S_rgb96_raw[87:80]),
+        correct_blue (S_rgb96_raw[79:72]),
+        correct_red  (S_rgb96_raw[71:64]),
+        correct_green(S_rgb96_raw[63:56]),
+        correct_blue (S_rgb96_raw[55:48]),
+        correct_red  (S_rgb96_raw[47:40]),
+        correct_green(S_rgb96_raw[39:32]),
+        correct_blue (S_rgb96_raw[31:24]),
+        correct_red  (S_rgb96_raw[23:16]),
+        correct_green(S_rgb96_raw[15:8]),
+        correct_blue (S_rgb96_raw[7:0])
+    };
+
+    // Keep the simple "安路" logo and border in the baseline image path.
+    // The algorithm itself is intentionally bypassed until the raw video
+    // path is proven on the board.
+    my_osd #(
+        .IMG_WIDTH  (1280),
+        .IMG_HEIGHT (720)
+    ) u_my_osd (
+        .I_clk      (axi4s_video_aclk),
+        .I_rst_n    (I_rst_n),
+        .I_tlast    (S_demosaic_tlast),
+        .I_tuser    (S_demosaic_tuser),
+        .I_tdata    (S_rgb96),
+        .I_tvalid   (S_demosaic_tvalid),
+        .I_tready   (S_osd_tready),
+        .O_tlast    (S_osd_tlast),
+        .O_tuser    (S_osd_tuser),
+        .O_tdata    (S_osd_tdata),
+        .O_tvalid   (S_osd_tvalid),
+        .O_tready   (),
+        .I_mode     (I_algo_mode),
+        .I_luma_avg (8'd128),
+        .I_osd_en   (I_osd_en)
+    );
+
+    assign S_osd_tready = O_tready;
+
+    // Four 96-bit beats (16 RGB pixels) are packed into three contiguous
+    // 128-bit beats (48 RGB bytes).  The packer also aligns frame_start with
+    // the first valid packed beat; video_in uses that marker to select the
+    // next DDR frame buffer.
+    data_96bit_to_128bit u_data_96bit_to_128bit (
+        .I_clk              (axi4s_video_aclk),
+        .I_rst_n            (I_rst_n),
+        .I_96b_frame_start  (S_osd_tuser),
+        .I_96b_valid        (S_osd_tvalid),
+        .I_96b_data         (S_osd_tdata),
+        .I_96b_tlast        (S_osd_tlast),
+        .O_128b_frame_start (S_packed_tuser),
+        .O_128b_valid       (S_packed_tvalid),
+        .O_128b_data        (S_packed_tdata),
+        .O_128b_tlast       (S_packed_tlast)
+    );
+
+    assign O_tdata  = S_packed_tdata;
+    assign O_tlast  = S_packed_tlast;
+    assign O_tuser  = S_packed_tuser;
+    assign O_tvalid = S_packed_tvalid;
+
+    // I_algo_th_offset is reserved for the later processing modes.
+    wire unused_algo_th_offset = ^I_algo_th_offset;
+
+endmodule

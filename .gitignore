@@ -1,0 +1,15 @@
+**/__pycache__/
+**/.venv/
+**/outputs/
+**/selftest.log
+**/packaging/build/
+**/packaging/build_*/
+**/packaging/dist/
+**/packaging/dist_*/
+**/packaging/release/
+*.py[cod]
+*.log
+*.logw
+*.dmp
+*.tmp
+*.lock

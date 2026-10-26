@@ -1,0 +1,222 @@
+//===========================================================================
+//  my_osd.v  ——  图像信息叠加（OSD）
+//  ---------------------------------------------------------------------
+//  满足赛题基础要求(4)：在输出画面中叠加图形/文字信息，并含"安路"标识。
+//  叠加内容：
+//    1) 整屏 3 像素白色边框        —— 一眼看出系统在跑
+//    2) 右下角"安路"金字标牌       —— 24x24 点阵字模，2 倍放大
+//    3) 左上角模式指示块           —— 颜色对应 4 种算法模式
+//    4) 左上角亮度条               —— 显示当前自适应阈值（0~255）
+//  数据接口与 my_algo_core 一致：每拍 4 个 RGB888 像素，96 bit，
+//  输出比输入晚 1 拍，不反压。
+//  I_osd_en = 0 时整块旁路，画面原样输出。
+//===========================================================================
+module my_osd #(
+    parameter IMG_WIDTH  = 1280,
+    parameter IMG_HEIGHT = 720
+)(
+    input               I_clk,
+    input               I_rst_n,
+    input               I_tlast,
+    input               I_tuser,
+    input      [95:0]   I_tdata,
+    input               I_tvalid,
+    input               I_tready,
+    output reg          O_tlast,
+    output reg          O_tuser,
+    output reg [95:0]   O_tdata,
+    output reg          O_tvalid,
+    output              O_tready,
+
+    input      [1:0]    I_mode,
+    input      [7:0]    I_luma_avg,
+    input               I_osd_en
+);
+
+    assign O_tready = I_tready;
+
+    // 画面布局参数
+    localparam [10:0] LOGO_X = IMG_WIDTH  - 133;    // 标牌左边界
+    localparam [10:0] LOGO_Y = IMG_HEIGHT - 63;     // 标牌上边界
+    localparam [10:0] LOGO_W = 128;
+    localparam [10:0] LOGO_H = 58;
+    localparam [10:0] MODE_X = 11'd10;
+    localparam [10:0] MODE_Y = 11'd10;
+    localparam [10:0] MODE_W = 11'd46;
+    localparam [10:0] MODE_H = 11'd28;
+    localparam [10:0] BAR_X  = 11'd10;
+    localparam [10:0] BAR_Y  = 11'd44;
+    localparam [10:0] BAR_W  = 11'd64;
+    localparam [10:0] BAR_H  = 11'd10;
+
+    //------------------ "安" 24x24 点阵字模 ------------------
+    function [23:0] rom_an;
+        input [4:0] r;
+        begin
+            case (r)
+                5'd0 : rom_an = 24'h003000;
+                5'd1 : rom_an = 24'h003800;
+                5'd2 : rom_an = 24'h001C00;
+                5'd3 : rom_an = 24'h001000;
+                5'd4 : rom_an = 24'h3FFFFC;
+                5'd5 : rom_an = 24'h30000C;
+                5'd6 : rom_an = 24'h30200C;
+                5'd7 : rom_an = 24'h30700C;
+                5'd8 : rom_an = 24'h006000;
+                5'd9 : rom_an = 24'h00C000;
+                5'd10: rom_an = 24'h00C000;
+                5'd11: rom_an = 24'h7FFFFE;
+                5'd12: rom_an = 24'h0180C0;
+                5'd13: rom_an = 24'h0380C0;
+                5'd14: rom_an = 24'h030180;
+                5'd15: rom_an = 24'h078180;
+                5'd16: rom_an = 24'h03F300;
+                5'd17: rom_an = 24'h007E00;
+                5'd18: rom_an = 24'h001F80;
+                5'd19: rom_an = 24'h0079F0;
+                5'd20: rom_an = 24'h01F07C;
+                5'd21: rom_an = 24'h3FC01E;
+                5'd22: rom_an = 24'h3E0004;
+                5'd23: rom_an = 24'h000000;
+                default: rom_an = 24'h000000;
+            endcase
+        end
+    endfunction
+
+    //------------------ "路" 24x24 点阵字模 ------------------
+    function [23:0] rom_lu;
+        input [4:0] r;
+        begin
+            case (r)
+                5'd0 : rom_lu = 24'h000300;
+                5'd1 : rom_lu = 24'h000700;
+                5'd2 : rom_lu = 24'h3FC600;
+                5'd3 : rom_lu = 24'h30C7FC;
+                5'd4 : rom_lu = 24'h30CC18;
+                5'd5 : rom_lu = 24'h30DC18;
+                5'd6 : rom_lu = 24'h30DE30;
+                5'd7 : rom_lu = 24'h3FF330;
+                5'd8 : rom_lu = 24'h3FC1E0;
+                5'd9 : rom_lu = 24'h0600C0;
+                5'd10: rom_lu = 24'h0601F0;
+                5'd11: rom_lu = 24'h060F3C;
+                5'd12: rom_lu = 24'h367C0F;
+                5'd13: rom_lu = 24'h37D002;
+                5'd14: rom_lu = 24'h360FF8;
+                5'd15: rom_lu = 24'h360C08;
+                5'd16: rom_lu = 24'h360C08;
+                5'd17: rom_lu = 24'h360C08;
+                5'd18: rom_lu = 24'h36EC08;
+                5'd19: rom_lu = 24'h3FCC08;
+                5'd20: rom_lu = 24'hFE0FF8;
+                5'd21: rom_lu = 24'h700C08;
+                5'd22: rom_lu = 24'h000C08;
+                5'd23: rom_lu = 24'h000000;
+                default: rom_lu = 24'h000000;
+            endcase
+        end
+    endfunction
+
+    //------------------ 单个像素的叠加运算 ------------------
+    function [23:0] osd_pix;
+        input [10:0] x;
+        input [10:0] y;
+        input [23:0] base;
+        input [1:0]  md;
+        input [7:0]  luma;
+        input        en;
+        reg   [10:0] lx, ly, cx;
+        reg   [4:0]  px, py;
+        reg   [6:0]  bar_len;
+        reg   [23:0] word;
+        begin
+            osd_pix = base;
+            if (en) begin
+                // 1) 整屏边框
+                if ((x < 11'd3) || (x > (IMG_WIDTH - 4)) ||
+                    (y < 11'd3) || (y > (IMG_HEIGHT - 4))) begin
+                    osd_pix = 24'hFFFFFF;
+                end
+
+                // 2) 右下角"安路"标牌
+                if ((x >= LOGO_X) && (x < (LOGO_X + LOGO_W)) &&
+                    (y >= LOGO_Y) && (y < (LOGO_Y + LOGO_H))) begin
+                    osd_pix = 24'h14203C;                     // 深蓝牌底
+                    lx = x - LOGO_X - 11'd16;                 // 左边距 16
+                    ly = y - LOGO_Y - 11'd5;                  // 上边距 5
+                    if ((lx < 11'd96) && (ly < 11'd48)) begin
+                        cx = (lx >= 11'd48) ? (lx - 11'd48) : lx;
+                        px = cx[5:1];                         // 2 倍放大
+                        py = ly[5:1];
+                        word = (lx >= 11'd48) ? rom_lu(py) : rom_an(py);
+                        if (word[5'd23 - px]) osd_pix = 24'hFFE24A;   // 金字
+                    end
+                end
+
+                // 3) 左上角模式指示块
+                if ((x >= MODE_X) && (x < (MODE_X + MODE_W)) &&
+                    (y >= MODE_Y) && (y < (MODE_Y + MODE_H))) begin
+                    case (md)
+                        2'd0: osd_pix = 24'hFFFFFF;   // Sobel 边缘检测
+                        2'd1: osd_pix = 24'hFFFF00;   // 灰度变换
+                        2'd2: osd_pix = 24'h00E0FF;   // 自适应阈值二值化
+                        default: osd_pix = 24'h00FF60; // 直通
+                    endcase
+                end
+
+                // 4) 左上角亮度条（长度 = 自适应阈值）
+                if ((x >= BAR_X) && (x < (BAR_X + BAR_W)) &&
+                    (y >= BAR_Y) && (y < (BAR_Y + BAR_H))) begin
+                    bar_len = {2'b00, luma[7:2]};             // 0~63
+                    if ((x - BAR_X) < bar_len) osd_pix = 24'h00FF60;
+                    else                       osd_pix = 24'h203040;
+                end
+            end
+        end
+    endfunction
+
+    //------------------ 行内坐标计数 ------------------
+    reg  [8:0]  x_grp;
+    reg  [10:0] y_pos;
+
+    wire [10:0] x_base = {x_grp, 2'b00};
+    wire [10:0] x0 = x_base;
+    wire [10:0] x1 = x_base + 11'd1;
+    wire [10:0] x2 = x_base + 11'd2;
+    wire [10:0] x3 = x_base + 11'd3;
+
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            O_tlast <= 1'b0;
+            O_tuser <= 1'b0;
+            O_tdata <= 96'd0;
+            O_tvalid<= 1'b0;
+            x_grp   <= 9'd0;
+            y_pos   <= 11'd0;
+        end else begin
+            O_tlast  <= I_tlast;
+            O_tuser  <= I_tuser;
+            O_tvalid <= I_tvalid;
+
+            if (I_tvalid) begin
+                O_tdata <= { osd_pix(x0, y_pos, I_tdata[95:72], I_mode, I_luma_avg, I_osd_en),
+                             osd_pix(x1, y_pos, I_tdata[71:48], I_mode, I_luma_avg, I_osd_en),
+                             osd_pix(x2, y_pos, I_tdata[47:24], I_mode, I_luma_avg, I_osd_en),
+                             osd_pix(x3, y_pos, I_tdata[23:0],  I_mode, I_luma_avg, I_osd_en) };
+
+                if (I_tlast) begin
+                    x_grp <= 9'd0;
+                    y_pos <= (y_pos == (IMG_HEIGHT - 1)) ? 11'd0 : (y_pos + 11'd1);
+                end else if (I_tuser) begin
+                    x_grp <= 9'd1;
+                    y_pos <= 11'd0;
+                end else begin
+                    x_grp <= x_grp + 9'd1;
+                end
+            end else begin
+                O_tdata <= 96'd0;
+            end
+        end
+    end
+
+endmodule
