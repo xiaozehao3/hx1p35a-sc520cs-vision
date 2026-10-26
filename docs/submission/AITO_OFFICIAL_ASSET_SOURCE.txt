@@ -1,0 +1,7 @@
+The AITO M9 vehicle image used as a model/application-scene illustration in the A1 poster was downloaded from the official AITO website homepage:
+https://aito.auto/
+
+The poster labels the image as an M9 model illustration. It is not a project camera capture or an image used for the reported plate-recognition result.
+
+The project repository is private. Its QR code resolves to:
+https://github.com/xiaozehao3/hx1p35a-sc520cs-vision

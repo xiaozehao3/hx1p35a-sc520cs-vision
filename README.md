@@ -6,6 +6,13 @@
 
 项目过程复盘、已完成范围、遗留问题和后续建议见 [PROJECT_RETROSPECTIVE.md](PROJECT_RETROSPECTIVE.md)。第三方许可提醒见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
+## 竞赛提交材料
+
+- [A1 竖版作品海报 PDF（含 GitHub 仓库二维码）](docs/submission/05_%E4%BD%9C%E5%93%81%E6%B5%B7%E6%8A%A5_A1%E7%AB%96%E7%89%88_GitHub%E4%BA%8C%E7%BB%B4%E7%A0%81.pdf)
+- [A1 竖版作品海报 PPTX 源文件](docs/submission/04_%E4%BD%9C%E5%93%81%E6%B5%B7%E6%8A%A5_A1%E7%AB%96%E7%89%88_GitHub%E4%BA%8C%E7%BB%B4%E7%A0%81.pptx)
+
+仓库为私有库。海报二维码打开仓库首页，浏览项目文件需要使用已获授权的 GitHub 账号登录。
+
 ## 视频处理模式
 
 在“视频处理”页面使用 K1/K2 切换，算法在帧边界更新：
